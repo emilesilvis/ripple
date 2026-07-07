@@ -73,6 +73,10 @@ impl OnePole {
     pub fn value(&self) -> f32 {
         self.z
     }
+    /// Start the smoother already settled at `v` instead of easing up from 0.
+    pub fn prime(&mut self, v: f32) {
+        self.z = v;
+    }
 }
 
 /// A general biquad. Constructed for a role (bandpass, lowpass, highpass,
@@ -173,44 +177,6 @@ impl Biquad {
             - self.a2 * self.y2;
         self.x2 = self.x1;
         self.x1 = x;
-        self.y2 = self.y1;
-        self.y1 = y;
-        y
-    }
-}
-
-/// A single resonant mode: a decaying sinusoid you excite with an impulse.
-///
-/// This is the atom of a struck solid. A real object (a roof panel, a rock, a
-/// glass chime) vibrates as a sum of these — its "modes". Strike it and each
-/// mode rings at its own frequency and fades at its own rate. The material is
-/// nothing more than *which* frequencies and decays it has.
-#[derive(Clone, Copy)]
-pub struct Mode {
-    // Resonator coefficients: y[n] = c1 y[n-1] - c2 y[n-2] + gain * x[n]
-    c1: f32,
-    c2: f32,
-    gain: f32,
-    y1: f32,
-    y2: f32,
-}
-
-impl Mode {
-    pub fn new(freq: f32, decay_secs: f32, sr: f32) -> Self {
-        let w = TAU * freq / sr;
-        let r = (-1.0 / (decay_secs * sr)).exp();
-        Self {
-            c1: 2.0 * r * w.cos(),
-            c2: r * r,
-            // Normalise so an impulse gives roughly unit peak regardless of freq.
-            gain: w.sin().max(1e-4),
-            y1: 0.0,
-            y2: 0.0,
-        }
-    }
-    #[inline]
-    pub fn process(&mut self, x: f32) -> f32 {
-        let y = self.c1 * self.y1 - self.c2 * self.y2 + self.gain * x;
         self.y2 = self.y1;
         self.y1 = y;
         y

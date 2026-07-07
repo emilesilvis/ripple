@@ -1,10 +1,14 @@
 //! Named worlds — the initial conditions you can drop into the same engine.
 //!
-//! A preset never says "make a stream sound". It lays out terrain, opens a
-//! spring, sets the weather, and populates the ground. The sound is whatever
-//! that world does once it starts running.
+//! A preset never says "make a stream sound" — nor even where the stream
+//! *is*. It raises terrain (a tilted block with random undulations —
+//! tectonics), opens a spring, sets the climate, and then runs a geological
+//! epoch: the water itself carves its channel and scours its rocky bed
+//! before the audible world begins. What you hear is whatever geography the
+//! water made.
 
 use crate::critters::Species;
+use crate::dsp::Noise;
 use crate::field::Surface;
 use crate::sky::Climate;
 use crate::world::World;
@@ -27,41 +31,54 @@ pub const PRESETS: &[PresetInfo] = &[
     PresetInfo { name: "storm", description: "a passing downpour: heavy rain, gusting wind, a full brook" },
 ];
 
-/// C-major pentatonic chime pitches, C4..A5 — sweet and safe.
+/// The chime-maker's pitches: C-major pentatonic, C4..A5. Only the *tuning
+/// intent* lives here — each pitch is inverted into a bar length, and the
+/// hung bar rings whatever the lattice decides.
 fn pentatonic() -> Vec<f32> {
     [0, 4, 7, 9, 12, 16, 19].iter().map(|s| 261.63 * 2f32.powf(*s as f32 / 12.0)).collect()
 }
 
-/// Carve a rocky brook: a channel sloping downhill, a spring at the top, an
-/// outlet at the bottom, rough stones along the bed.
-fn carve_brook(w: &mut World) {
+/// Tectonics: raise a tilted block with gentle random undulations. No valley
+/// is drawn — where the water will run is not decided here.
+fn uplift(w: &mut World, seed: u32, tilt: f32, bumpiness: f32) {
+    let mut rng = Noise::new(seed ^ 0x9e01_7ec7);
+    let (p1, p2, p3, p4) = (
+        rng.range(0.0, 6.28),
+        rng.range(0.0, 6.28),
+        rng.range(0.0, 6.28),
+        rng.range(0.0, 6.28),
+    );
+    let f = w.field_mut();
+    let width = f.width();
+    let height = f.height();
+    for y in 0..height {
+        let base = (height - 1 - y) as f32 * tilt;
+        for x in 0..width {
+            let (nx, ny) = (x as f32 / width as f32, y as f32 / height as f32);
+            let bumps = (nx * 9.4 + p1).sin() * (ny * 7.1 + p2).sin()
+                + 0.5 * (nx * 17.3 + p3).sin() * (ny * 13.9 + p4).sin();
+            f.set_terrain(x, y, base + bumpiness * bumps);
+            f.set_surface(x, y, Surface::Open);
+        }
+    }
+}
+
+/// Open a spring near the top of the slope and let the world's edge drain,
+/// then run the geological epoch: the spring and the climate's rain carve a
+/// channel and scour its bed wherever the water actually chooses to run.
+fn spring_and_geology(w: &mut World, rainfall: f32) {
     let f = w.field_mut();
     let width = f.width();
     let height = f.height();
     let cx = width / 2;
-    for y in 0..height {
-        // Overall downhill slope so water always has somewhere to go.
-        let base = (height - 1 - y) as f32 * 0.05;
-        for x in 0..width {
-            // A gentle V-shaped valley focuses water into the middle.
-            let banks = ((x as isize - cx as isize).abs() as f32) * 0.06;
-            f.set_terrain(x, y, base + banks);
-            // Stones only in the channel, where the water will run.
-            if (x as isize - cx as isize).abs() <= 2 {
-                f.set_surface(x, y, Surface::Rock);
-                f.set_rough(x, y, 1.0);
-            }
-        }
-    }
-    // A spring at the top of the channel and an outlet at the very bottom.
     for dx in 0..=1 {
         f.set_source(cx + dx, 0, 0.9);
-        f.set_source(cx.wrapping_sub(dx), 0, 0.9);
+        f.set_source(cx - dx, 0, 0.9);
     }
     for x in 0..width {
         f.set_drain(x, height - 1, 6.0);
-        f.set_depth(x, height - 1, 0.0);
     }
+    f.geology(30_000, rainfall);
 }
 
 /// A flat clearing with open ground everywhere — rain soaks in, water pools.
@@ -77,36 +94,68 @@ fn flat_ground(w: &mut World) {
     }
 }
 
-/// A beach: deep water at the left edge rising to dry sand at the right, with a
-/// swell forced along the deep edge. Waves travel in and break where it shoals.
+/// A shore: the continental ramp — deep water at the left edge rising to dry
+/// sand at the right — with a swell forced along the deep edge. Where the
+/// surf zone lies is not marked: a geological epoch of waves wears the shoal
+/// where they actually break, and that wear is the roughness the foam
+/// churns against.
 fn build_beach(w: &mut World) {
+    {
+        let f = w.field_mut();
+        let width = f.width();
+        let height = f.height();
+        for y in 0..height {
+            for x in 0..width {
+                let t = x as f32 / (width - 1) as f32;
+                let terr = -0.6 + 1.0 * t;
+                f.set_terrain(x, y, terr);
+                f.set_surface(x, y, Surface::Open);
+                if terr < 0.0 {
+                    f.set_depth(x, y, -terr);
+                }
+            }
+        }
+        f.set_swell(0.28, 7.5, 0.0);
+        f.geology(30_000, 0.0);
+    }
+    // The epoch drained the basin; refill the sea to the waterline over
+    // whatever bed the waves have left.
     let f = w.field_mut();
     let width = f.width();
     let height = f.height();
     for y in 0..height {
         for x in 0..width {
-            // Terrain rises from -0.6 (deep) to +0.4 (dry) across the width.
-            let t = x as f32 / (width - 1) as f32;
-            let terr = -0.6 + 1.0 * t;
-            f.set_terrain(x, y, terr);
-            f.set_surface(x, y, Surface::Rock);
-            // Foam churns most in the shallow surf zone.
-            f.set_rough(x, y, if terr > -0.3 && terr < 0.2 { 1.0 } else { 0.2 });
-            // Start the sea filled to the waterline.
+            let terr = f.terrain_at(x, y);
             if terr < 0.0 {
                 f.set_depth(x, y, -terr);
             }
         }
     }
-    f.set_swell(0.28, 7.5, 0.0);
+}
+
+/// Build a hut roof over the ground the water did *not* claim: cells the
+/// epoch left unscoured get a corrugated sheet overhead, so the emergent
+/// streambed stays open to the sky and the rain keeps feeding it.
+fn roof_off_the_stream(w: &mut World) {
+    let f = w.field_mut();
+    let width = f.width();
+    let height = f.height();
+    for y in 0..height {
+        for x in 0..width {
+            if f.surface_at(x as f32 / width as f32, y as f32 / height as f32) != Surface::Rock {
+                f.set_surface(x, y, Surface::Roof);
+            }
+        }
+    }
 }
 
 pub fn build(name: &str, sr: f32, seed: u32) -> Option<World> {
     let w = match name {
         "glade" => {
             let mut w = World::new(sr, seed, Climate::calm_day(), 20, 44, 0.2);
-            carve_brook(&mut w);
-            w.enable_stream(2.4);
+            uplift(&mut w, seed, 0.05, 0.12);
+            spring_and_geology(&mut w, 0.015);
+            w.enable_stream(1.8);
             w.enable_leaves(0.7);
             w.enable_wind(0.9);
             w.add_chorus(Species::songbird(), 3, 0.0, 0.6, 0.0);
@@ -116,31 +165,19 @@ pub fn build(name: &str, sr: f32, seed: u32) -> Option<World> {
         }
         "brook" => {
             let mut w = World::new(sr, seed, Climate::calm_day(), 20, 44, 0.2);
-            carve_brook(&mut w);
-            w.enable_stream(3.0);
+            uplift(&mut w, seed, 0.05, 0.12);
+            spring_and_geology(&mut w, 0.015);
+            w.enable_stream(2.2);
             w.set_reverb(1.0, 0.4);
             w
         }
         "cozy-rain" => {
             let mut w = World::new(sr, seed, Climate::rainy(), 20, 44, 0.2);
-            carve_brook(&mut w);
-            // A roof over the near half of the clearing to drum on.
-            {
-                let f = w.field_mut();
-                let width = f.width();
-                let height = f.height();
-                for y in 0..height {
-                    for x in 0..width {
-                        // A wide roof overhead; leave the channel open so the
-                        // brook still runs and a little rain feeds it.
-                        if (x as isize - (width / 2) as isize).abs() > 3 {
-                            f.set_surface(x, y, Surface::Roof);
-                        }
-                    }
-                }
-            }
+            uplift(&mut w, seed, 0.05, 0.12);
+            spring_and_geology(&mut w, 0.03);
+            roof_off_the_stream(&mut w);
             w.enable_rain(1.4, true);
-            w.enable_stream(1.6);
+            w.enable_stream(1.2);
             w.add_chimes(&pentatonic(), 0.16);
             w.set_reverb(1.2, 0.5);
             w
@@ -187,10 +224,10 @@ pub fn build(name: &str, sr: f32, seed: u32) -> Option<World> {
         }
         "storm" => {
             let mut w = World::new(sr, seed, Climate::rainy(), 20, 44, 0.2);
-            carve_brook(&mut w);
-            flat_open_top(&mut w);
+            uplift(&mut w, seed, 0.05, 0.12);
+            spring_and_geology(&mut w, 0.03);
             w.enable_rain(1.5, false);
-            w.enable_stream(2.2);
+            w.enable_stream(1.6);
             w.enable_wind(2.2);
             w.enable_leaves(0.7);
             w.set_reverb(1.3, 0.5);
@@ -201,17 +238,34 @@ pub fn build(name: &str, sr: f32, seed: u32) -> Option<World> {
     Some(w)
 }
 
-/// Make sure the ground around a brook is open, so a downpour reaches the water
-/// and swells it (rain → runoff → a louder stream, all on its own).
-fn flat_open_top(w: &mut World) {
-    let f = w.field_mut();
-    let width = f.width();
-    let height = f.height();
-    for y in 0..height {
-        for x in 0..width {
-            if f.surface_at(x as f32 / width as f32, y as f32 / height as f32) != Surface::Rock {
-                f.set_surface(x, y, Surface::Open);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The brook must *emerge*: from a tilted, bumpy, unmarked plain, the
+    /// geological epoch has to leave a scoured rocky bed, and the spring's
+    /// water has to audibly churn along it once the world runs.
+    #[test]
+    fn a_channel_is_carved_and_a_brook_runs_in_it() {
+        let mut w = build("brook", 48_000.0, 12345).unwrap();
+        {
+            let f = w.field_mut();
+            let (width, height) = (f.width(), f.height());
+            let mut rock = 0;
+            for y in 0..height {
+                for x in 0..width {
+                    if f.surface_at(x as f32 / width as f32, y as f32 / height as f32) == Surface::Rock {
+                        rock += 1;
+                    }
+                }
             }
+            let total = width * height;
+            assert!(rock > total / 50, "geology should scour some cells to rock (got {rock})");
+            assert!(rock < total / 2, "geology should not scour everything (got {rock}/{total})");
         }
+        // Let the spring refill its channel, then listen to the water.
+        w.probe(12.0);
+        let (flow_e, _) = w.field_mut().flow();
+        assert!(flow_e > 0.02, "the brook should be running and churning (flow_e = {flow_e})");
     }
 }

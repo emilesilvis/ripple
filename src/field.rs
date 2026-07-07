@@ -22,11 +22,14 @@ pub enum Surface {
     Rock,
 }
 
-/// A discrete thing the water does that the ear can hear.
+/// A discrete thing the water does that the ear can hear. The field reports
+/// only physical facts — a bubble's *size*, a wave's energy; what they sound
+/// like is decided by law where the world listens (Minnaert's resonance turns
+/// a radius into a pitch).
 #[derive(Clone, Copy)]
 pub enum Event {
-    /// Air entrained in fast water — a little rising bubble.
-    Bubble { pan: f32, freq: f32, energy: f32 },
+    /// Air entrained in fast water — a bubble of some radius, in metres.
+    Bubble { pan: f32, radius_m: f32, energy: f32 },
     /// A wave shoaling and tipping over — a wash of foam.
     Break { pan: f32, energy: f32 },
 }
@@ -97,13 +100,12 @@ impl Field {
         let i = self.idx(x, y);
         self.terrain[i] = height;
     }
+    pub fn terrain_at(&self, x: usize, y: usize) -> f32 {
+        self.terrain[self.idx(x, y)]
+    }
     pub fn set_surface(&mut self, x: usize, y: usize, s: Surface) {
         let i = self.idx(x, y);
         self.surface[i] = s;
-    }
-    pub fn set_rough(&mut self, x: usize, y: usize, r: f32) {
-        let i = self.idx(x, y);
-        self.rough[i] = r;
     }
     pub fn set_source(&mut self, x: usize, y: usize, rate: f32) {
         let i = self.idx(x, y);
@@ -273,14 +275,16 @@ impl Field {
                 let speed = self.cell_speed(x, y, c);
                 let pan = x as f32 / (self.w - 1) as f32;
 
-                // Bubbles: fast water over a rough bed entrains air.
+                // Bubbles: fast water over a rough bed entrains air. Faster
+                // churn tears off smaller bubbles; their pitch is not chosen
+                // here — size is the physical fact, Minnaert does the rest.
                 let churn = speed * self.rough[c];
                 if churn > 0.04 {
                     let rate = (churn * 40.0).min(20.0);
                     if self.rng.chance((rate * dt).min(0.9)) {
-                        let freq = self.rng.range(360.0, 900.0) * (1.0 + churn);
+                        let radius_m = self.rng.range(0.0036, 0.009) / (1.0 + churn);
                         let energy = (churn * 0.5).min(0.1);
-                        self.events.push(Event::Bubble { pan, freq, energy });
+                        self.events.push(Event::Bubble { pan, radius_m, energy });
                     }
                 }
 
@@ -331,5 +335,70 @@ impl Field {
     /// Total water volume in the field — for diagnostics (a rising brook).
     pub fn total_water(&self) -> f32 {
         self.depth.iter().sum::<f32>() * self.cell * self.cell
+    }
+
+    /// A geological epoch, run before the audible world starts: let the
+    /// water that will live here — the spring, an average rainfall, the
+    /// swell — flow over the raw uplifted terrain and *carve* it.
+    ///
+    /// One law (stream power): running water wears the bed down in
+    /// proportion to how fast it runs. Wherever flow concentrates it cuts
+    /// deeper, which concentrates the flow further — and a channel is born,
+    /// with no valley drawn by hand. The wear itself becomes the bed the
+    /// ear will hear: heavily-cut cells are scoured to bare rock and stay
+    /// rough, so the brook churns precisely where the water actually dug.
+    pub fn geology(&mut self, steps: usize, rainfall: f32) {
+        let dt = 0.01; // compressed geological time per step
+        let k_erode = 0.4; // stream-power constant
+        // The soft cover is only so deep; below it, bedrock resists. This is
+        // what keeps a valley a valley instead of a bottomless trench.
+        let soil = 0.35;
+        let n = self.w * self.h;
+        let mut wear = vec![0.0f32; n];
+
+        for _ in 0..steps {
+            if rainfall > 0.0 {
+                for d in self.depth.iter_mut() {
+                    *d += rainfall * dt;
+                }
+            }
+            self.step(dt);
+            for y in 0..self.h {
+                for x in 0..self.w {
+                    let c = self.idx(x, y);
+                    let d = self.depth[c];
+                    if d < 1e-4 {
+                        continue;
+                    }
+                    // Only shallow, fast water works the bed — deep water's
+                    // motion never reaches it. (This is also why the sea
+                    // wears its shore exactly where the waves break.)
+                    let shallow = (1.0 - d / 0.3).max(0.0);
+                    let dz = (k_erode * shallow * self.cell_speed(x, y, c) * dt)
+                        .min(soil - wear[c])
+                        .max(0.0);
+                    self.terrain[c] -= dz;
+                    wear[c] += dz;
+                }
+            }
+        }
+
+        // The carved bed: roughness follows the cutting, and cells stripped
+        // of most of their cover are scoured down to bare rock.
+        for i in 0..n {
+            let cut = wear[i] / soil;
+            self.rough[i] = cut.sqrt().min(1.0);
+            if cut > 0.6 {
+                self.surface[i] = Surface::Rock;
+            }
+        }
+
+        // The epoch's water drains away; the audible world starts fresh.
+        self.depth.iter_mut().for_each(|d| *d = 0.0);
+        self.fx.iter_mut().for_each(|f| *f = 0.0);
+        self.fy.iter_mut().for_each(|f| *f = 0.0);
+        self.prev_speed.iter_mut().for_each(|s| *s = 0.0);
+        self.events.clear();
+        self.time = 0.0;
     }
 }

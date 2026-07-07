@@ -10,9 +10,16 @@
 use crate::critters::{Chorus, Species};
 use crate::dsp::{pan, Noise, Space};
 use crate::field::{Event, Field, Surface};
+use crate::matter::{bar_length_for_pitch, Body, Matter};
 use crate::sky::{Climate, Sky};
-use crate::voices::{FlowVoicing, Material, Modal, Turbulence};
+use crate::voices::{Eddies, Turbulence};
 use std::f32::consts::TAU;
+
+/// Minnaert's law: an air bubble of radius r in water rings at ~3.26/r Hz·m.
+/// Every plink and burble in the world gets its pitch from this one line.
+fn minnaert_hz(radius_m: f32) -> f32 {
+    3.26 / radius_m.max(1e-4)
+}
 
 const BLOCK: usize = 32; // samples between physics updates (~1.5 kHz control rate)
 
@@ -58,10 +65,10 @@ impl Bubble {
     }
 }
 
-/// One resonant object that hangs in the air and is struck by the wind (a
-/// chime). Its pitch is the material; the timing comes from the gusts.
+/// One steel bar that hangs in the air and is struck by the wind (a chime).
+/// Its pitch is nothing but its length; the timing comes from the gusts.
 struct Chime {
-    modal: Modal,
+    body: Body,
     pan: f32,
 }
 
@@ -90,10 +97,9 @@ pub struct World {
     surf: Option<Turbulence>,
     flame: Option<Turbulence>,
 
-    // Struck-solid voices.
-    roof: Option<Modal>,   // rain drumming on a roof
-    ground: Option<Modal>, // rain landing on wet ground / pond
-    fire_wood: Option<Modal>,
+    // Struck bodies — lattices of bonded matter.
+    roof: Option<Body>, // a corrugated steel sheet for rain to drum on
+    fire_wood: Option<Body>,
     chimes: Vec<Chime>,
     chime_gain: f32,
 
@@ -140,7 +146,6 @@ impl World {
             surf: None,
             flame: None,
             roof: None,
-            ground: None,
             fire_wood: None,
             chimes: Vec::new(),
             chime_gain: 0.0,
@@ -172,41 +177,67 @@ impl World {
         self.reverb_mix = mix;
     }
 
+    // Every fluid voice below is the same Turbulence under the same Strouhal
+    // law; all that distinguishes wind from brook from flame is the physical
+    // eddy scale and the reference flow speed handed over here.
+
+    /// Water running over its bed: capillary-scale surface eddies, ~1 m/s.
     pub fn enable_stream(&mut self, gain: f32) {
-        self.stream = Some((Turbulence::new(FlowVoicing::water(), self.sr, self.seed ^ 0x57, gain), 0.06));
+        self.stream =
+            Some((Turbulence::new(Eddies::free_shear(1.0e-4, 1.2), self.sr, self.seed ^ 0x57, gain), 0.06));
     }
+    /// Foam churning in the surf zone: finer spray eddies, faster water.
     pub fn enable_surf(&mut self, gain: f32) {
-        self.surf = Some(Turbulence::new(FlowVoicing::surf(), self.sr, self.seed ^ 0x5f, gain));
+        self.surf = Some(Turbulence::new(Eddies::free_shear(1.5e-4, 3.0), self.sr, self.seed ^ 0x5f, gain));
     }
+    /// Air shearing past the listener (millimetre eddies, gale at speed 1),
+    /// plus a whistling crack — the same law through a resonant aperture.
     pub fn enable_wind(&mut self, gain: f32) {
-        self.wind = Some(Turbulence::new(FlowVoicing::wind(), self.sr, self.seed ^ 0x1d, gain));
+        self.wind = Some(Turbulence::new(Eddies::free_shear(3.0e-3, 14.0), self.sr, self.seed ^ 0x1d, gain));
         self.whistle = Some(Turbulence::new(
-            FlowVoicing { base_hz: 1700.0, speed_hz: 700.0, q: 9.0, darken_hz: 4000.0 },
+            Eddies::aperture(1.0e-3, 14.0, 9.0),
             self.sr,
             self.seed ^ 0x1e,
             gain * 0.5,
         ));
     }
+    /// Air torn at leaf edges: the smallest eddies in the world, hence the
+    /// highest voice.
     pub fn enable_leaves(&mut self, gain: f32) {
-        self.leaves = Some(Turbulence::new(FlowVoicing::leaves(), self.sr, self.seed ^ 0x1f, gain));
+        self.leaves = Some(Turbulence::new(Eddies::free_shear(3.0e-4, 14.0), self.sr, self.seed ^ 0x1f, gain));
     }
+    /// A fire: a buoyant plume of slowish air (the rumble) over a wooden log
+    /// — a real bar of wood — that pops as pockets burst against it.
     pub fn enable_fire(&mut self, gain: f32) {
-        self.flame = Some(Turbulence::new(FlowVoicing::flame(), self.sr, self.seed ^ 0xf1, gain));
-        self.fire_wood = Some(Modal::new(&Material::wood(), self.sr, self.seed ^ 0xf2, gain * 1.4));
+        self.flame = Some(Turbulence::new(Eddies::free_shear(1.0e-3, 2.5), self.sr, self.seed ^ 0xf1, gain));
+        self.fire_wood = Some(Body::bar(&Matter::wood(), 1.2, 0.10, 12, self.sr, self.seed ^ 0xf2, gain * 28.0));
         self.fire_gain = gain;
     }
+    /// Rain. If there is a roof, it is an actual corrugated steel sheet —
+    /// the same steel as the chimes, rolled thin; corrugation is why it
+    /// rings in the kilohertz. Drops on open water need no instrument at
+    /// all: each entrains a little air bubble whose Minnaert ring *is* the
+    /// plink.
     pub fn enable_rain(&mut self, gain: f32, on_roof: bool) {
         self.rain_gain = gain;
         if on_roof {
-            self.roof = Some(Modal::new(&Material::tin(), self.sr, self.seed ^ 0x2a, gain * 0.9));
+            self.roof =
+                Some(Body::sheet(&Matter::steel(), 0.25, 0.18, 0.02, 7, self.sr, self.seed ^ 0x2a, gain * 36.0));
         }
-        self.ground = Some(Modal::new(&Material::water_surface(), self.sr, self.seed ^ 0x2b, gain * 0.8));
     }
+    /// Hang a set of steel bars. The preset hands over *pitches* only in the
+    /// sense a chime-maker does: each is converted to a length by inverting
+    /// the bending law, and from then on the bar rings entirely on its own —
+    /// overtones, click and decay are the lattice's business.
     pub fn add_chimes(&mut self, freqs: &[f32], gain: f32) {
         self.chime_gain = gain;
+        let steel = Matter::steel();
+        const THICKNESS: f32 = 0.022;
+        const NODES: usize = 14;
         for (i, f) in freqs.iter().enumerate() {
-            let modal = Modal::new(&Material::chime(*f), self.sr, self.seed ^ (0x3a + i as u32), gain);
-            self.chimes.push(Chime { modal, pan: 0.15 + 0.7 * (i as f32 / freqs.len().max(1) as f32) });
+            let length = bar_length_for_pitch(&steel, THICKNESS, NODES, *f);
+            let body = Body::bar(&steel, length, THICKNESS, NODES, self.sr, self.seed ^ (0x3a + i as u32), gain * 60.0);
+            self.chimes.push(Chime { body, pan: 0.15 + 0.7 * (i as f32 / freqs.len().max(1) as f32) });
         }
     }
     pub fn add_chorus(&mut self, sp: Species, count: usize, coupling: f32, gain: f32, nocturnal: f32) {
@@ -242,8 +273,12 @@ impl World {
                     Surface::Open | Surface::Rock => {
                         // The drop soaks in — this is how rain swells the brook.
                         self.field.add_water(nx, ny, energy * 0.006);
-                        if let Some(ground) = &mut self.ground {
-                            ground.strike(energy * 0.7, nx);
+                        // A drop punching into water entrains a tiny bubble;
+                        // its Minnaert ring is the plink of rain on a pond.
+                        let radius_m = self.rng.range(0.8e-3, 2.5e-3);
+                        let amp = energy * 0.4 * self.rain_gain;
+                        if let Some(b) = self.bubbles.iter_mut().find(|b| !b.active) {
+                            b.spawn(minnaert_hz(radius_m), amp, nx, &mut self.rng);
                         }
                     }
                 }
@@ -265,9 +300,9 @@ impl World {
         let events: Vec<Event> = self.field.drain_events().collect();
         for ev in events {
             match ev {
-                Event::Bubble { pan, freq, energy } => {
+                Event::Bubble { pan, radius_m, energy } => {
                     if let Some(b) = self.bubbles.iter_mut().find(|b| !b.active) {
-                        b.spawn(freq, energy, pan, &mut self.rng);
+                        b.spawn(minnaert_hz(radius_m), energy, pan, &mut self.rng);
                     }
                 }
                 Event::Break { pan, energy } => {
@@ -301,8 +336,10 @@ impl World {
             if self.rng.chance(p) {
                 let i = (self.rng.unit() * self.chimes.len() as f32) as usize % self.chimes.len();
                 let energy = self.rng.range(0.15, 0.4) * gust;
-                let pan_pos = self.chimes[i].pan;
-                self.chimes[i].modal.strike(energy, pan_pos);
+                // The gust shoves the bar somewhere along its length; where it
+                // lands decides which modes wake, so no two strikes ring alike.
+                let at = self.rng.range(0.15, 0.85);
+                self.chimes[i].body.strike(energy, at);
             }
         }
 
@@ -431,20 +468,13 @@ impl World {
             r += y;
         }
 
-        // Struck solids.
+        // Struck bodies, each a lattice still ringing from whatever hit it.
         if let Some(roof) = &mut self.roof {
             let (x, y) = roof.process();
             l += x;
             r += y;
             verb_l += x * 0.12;
             verb_r += y * 0.12;
-        }
-        if let Some(ground) = &mut self.ground {
-            let (x, y) = ground.process();
-            l += x;
-            r += y;
-            verb_l += x * 0.08;
-            verb_r += y * 0.08;
         }
         if let Some(wood) = &mut self.fire_wood {
             let (x, y) = wood.process();
@@ -454,11 +484,13 @@ impl World {
             verb_r += y * 0.04;
         }
         for chime in &mut self.chimes {
-            let (x, y) = chime.modal.process();
-            l += x;
-            r += y;
-            verb_l += x * 0.6;
-            verb_r += y * 0.6;
+            let (x, y) = chime.body.process();
+            let (xl, _) = pan(x, chime.pan);
+            let (_, yr) = pan(y, chime.pan);
+            l += xl;
+            r += yr;
+            verb_l += xl * 0.6;
+            verb_r += yr * 0.6;
         }
 
         // Bubbles.

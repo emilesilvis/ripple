@@ -15,6 +15,7 @@ mod audio;
 mod critters;
 mod dsp;
 mod field;
+mod matter;
 mod presets;
 mod sky;
 mod voices;
