@@ -34,6 +34,52 @@ chosen unless you supply `--seed <u32>`; the same seed and sample rate reproduce
 a world's evolution. Water and terrain history persist while a world runs;
 selecting or restarting a world creates a new simulation.
 
+## Discover alien soundscapes
+
+```sh
+cargo run --release -- atlas --seed 12345
+```
+
+The alien world library discovers initial conditions for the **same world engine**
+as the eight Earth worlds: evolving water and sediment, flow-driven turbulence,
+coupled bubbles, physical contact between suspended bodies, and populations
+that hear one another. Materials, geometry, weather, fluid scales and population
+behaviour vary. Population spectra come from generated mass-and-spring organs;
+there are no named Earth species or musical tuning scales in this generator.
+
+An empty library starts exploring automatically. Use arrows and `Enter` to listen,
+`f` to favourite, `Tab` to browse Atlas/Favourites/All saved, `g` to explore more,
+and `e` to explore nearby variations of the highlighted world. Accepted worlds
+save automatically in `discoveries/atlas`; later searches preserve old discoveries
+and favourites. Pause, volume, replay and quit use the normal player controls.
+
+The search measures rendered brightness, texture, motion and stereo width,
+then retains a calmness-proxy winner in each occupied sound region. It seeks a
+collection of different sounds, rather than a single global winner. Those
+measurements encourage variety; human listening still decides what feels alien
+and peaceful. See [the alien world library guide](docs/alien-atlas.md) for details.
+
+The original small resonator A/B experiment and its saved lineages remain available:
+
+```sh
+cargo run --release -- discover --seed 12345
+cargo run --release -- discover discoveries/<saved-file>.alien
+```
+
+This smaller listening mode generates networks of masses and springs, then
+searches structural mutations for a less rough, varied spectrum. Their voices
+follow the resulting resonances; there are no species presets or musical note
+lists. Both the parent and discovered descendant obey shared energy limits,
+soft excitation, sparse activity, high-frequency damping, and slow weather.
+Those rules bias the result toward calm listening; they do not guarantee
+subjective pleasantness.
+
+It starts with the automatically selected descendant. Use `a`/`b` to compare,
+`e` to keep the audible candidate and search its descendants, and `s` to save
+the pair and lineage in `discoveries/`. Pause, volume, replay, new seed, and
+quit use the normal player controls. See [the discovery guide](docs/alien-discovery.md)
+for the laws, listening-level matching, save format, and limits.
+
 ## The worlds
 
 | World | What is happening |
@@ -124,6 +170,12 @@ pause/restart behaviour.
 src/
   main.rs       command-line entry point and seed handling
   tui.rs        world chooser, live audio, playback controls, and level meter
+  alien.rs      bounded resonator networks, structural search, and saved lineages
+  alien/worlds.rs    discovered physical recipes assembled with the shared World
+  alien/analysis.rs rendered audio descriptors and calmness proxy
+  alien/atlas.rs    diverse archive, immutable world files, and favourites
+  tui/library.rs   browsing, playback, and background exploration
+  world/assembly.rs shared physical assembly interfaces and diagnostics
   audio.rs      checked offline WAV rendering
   dsp.rs        noise, filters, resonators, and reverb
   matter.rs     elastic mass-spring lattices and material constants

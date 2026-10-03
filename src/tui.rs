@@ -1,7 +1,7 @@
 //! Live world selection. The audio callback owns the world; construction and
 //! disposal happen on the UI side so changing scenes cannot block playback.
 
-use crate::{presets, world::World};
+use crate::{alien, presets, world::World};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
@@ -14,16 +14,68 @@ use std::io::{self, IsTerminal, Write};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
+pub mod library;
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+type Metrics = [(&'static str, [f64; 2], &'static str); 4];
+
+enum Source {
+    World(Box<World>),
+    Alien(Box<alien::LiveDemo>),
+    Discovered(Box<alien::worlds::Soundscape>),
+    Silence,
+}
+
+impl From<World> for Source {
+    fn from(world: World) -> Self {
+        Self::World(Box::new(world))
+    }
+}
+
+impl Source {
+    fn build(selection: usize, sr: f32, seed: u32, discovery: Option<&alien::Discovery>) -> Self {
+        match discovery {
+            Some(discovery) => {
+                Self::Alien(Box::new(alien::LiveDemo::from_discovery(sr, discovery)))
+            }
+            None => presets::build(presets::PRESETS[selection].name, sr, seed)
+                .unwrap()
+                .into(),
+        }
+    }
+
+    fn next_sample(&mut self) -> (f32, f32) {
+        match self {
+            Self::World(world) => world.next_sample(),
+            Self::Alien(demo) => demo.next_sample(),
+            Self::Discovered(world) => world.next_sample(),
+            Self::Silence => (0.0, 0.0),
+        }
+    }
+
+    fn select(&mut self, condition: usize) {
+        if let Self::Alien(demo) = self {
+            demo.select(condition);
+        }
+    }
+
+    fn metrics(&self) -> Option<Metrics> {
+        match self {
+            Self::Alien(demo) => Some(demo.metrics()),
+            Self::World(_) | Self::Discovered(_) | Self::Silence => None,
+        }
+    }
+}
 
 enum Command {
     Replace {
         generation: u64,
-        world: World,
+        world: Source,
         paused: bool,
     },
     Volume(f32),
     Pause(bool),
+    Condition(usize),
 }
 
 #[derive(Clone, Copy, Default)]
@@ -34,15 +86,16 @@ struct Snapshot {
     rms: f64,
     invalid_samples: u64,
     clipped_samples: u64,
+    metrics: Option<Metrics>,
 }
 
 struct Player {
-    world: World,
+    world: Source,
     sr: f32,
     commands: Receiver<Command>,
     snapshots: SyncSender<Snapshot>,
-    retired: SyncSender<World>,
-    deferred_retirement: Option<World>,
+    retired: SyncSender<Source>,
+    deferred_retirement: Option<Source>,
     generation: u64,
     volume: f32,
     volume_target: f32,
@@ -58,14 +111,14 @@ struct Player {
 
 impl Player {
     fn new(
-        world: World,
+        world: impl Into<Source>,
         sr: f32,
         commands: Receiver<Command>,
         snapshots: SyncSender<Snapshot>,
-        retired: SyncSender<World>,
+        retired: SyncSender<Source>,
     ) -> Self {
         Self {
-            world,
+            world: world.into(),
             sr,
             commands,
             snapshots,
@@ -118,6 +171,7 @@ impl Player {
                 }
                 Command::Volume(volume) => self.volume_target = volume,
                 Command::Pause(paused) => self.paused = paused,
+                Command::Condition(condition) => self.world.select(condition),
             }
             if self.deferred_retirement.is_some() {
                 break;
@@ -157,6 +211,7 @@ impl Player {
                 rms: (self.squares / self.meter_samples as f64).sqrt(),
                 invalid_samples: self.invalid_samples,
                 clipped_samples: self.clipped_samples,
+                metrics: self.world.metrics(),
             });
             self.meter_samples = 0;
             self.peak = 0.0;
@@ -228,20 +283,142 @@ struct Ui {
     paused: bool,
     generation: u64,
     loading: Option<usize>,
-    pending_load: Option<(u64, usize, u32)>,
+    pending_load: Option<(u64, usize, u32, Option<alien::Discovery>)>,
     building: bool,
     snapshot: Snapshot,
+    discovery: Option<alien::Discovery>,
+    condition: usize,
+    notice: Option<String>,
 }
 
 impl Ui {
     fn request_world(&mut self, selection: usize) {
         self.generation += 1;
         self.loading = Some(selection);
-        self.pending_load = Some((self.generation, selection, self.seed));
+        self.pending_load = Some((
+            self.generation,
+            selection,
+            self.seed,
+            self.discovery.clone(),
+        ));
         self.paused = false;
+        self.notice = None;
+    }
+
+    fn name(&self) -> &'static str {
+        if self.discovery.is_some() {
+            "alien discovery"
+        } else {
+            presets::PRESETS[self.playing].name
+        }
+    }
+
+    fn discovery_lines(&self, device: &str, sr: u32) -> Vec<(Color, String)> {
+        let discovery = self.discovery.as_ref().unwrap();
+        let mut lines = vec![
+            (Color::Cyan, " ripple / alien discovery".into()),
+            (Color::DarkGrey, format!(" {device} | {sr} Hz")),
+            (
+                Color::White,
+                format!(
+                    " Seed {} | Generation {}",
+                    self.seed,
+                    discovery.generation()
+                ),
+            ),
+            (
+                Color::White,
+                format!(
+                    " {} | {:.1}s | volume {:.0}%",
+                    if self.loading.is_some() {
+                        "Discovering; previous audio continues"
+                    } else if self.paused {
+                        "Paused"
+                    } else {
+                        "Playing"
+                    },
+                    self.snapshot.seconds,
+                    self.volume * 100.0
+                ),
+            ),
+            (Color::White, String::new()),
+            (
+                Color::Cyan,
+                format!(
+                    " {} A: Parent      {} B: Discovery",
+                    if self.condition == 0 { "[x]" } else { "[ ]" },
+                    if self.condition == 1 { "[x]" } else { "[ ]" }
+                ),
+            ),
+            (Color::White, " Both follow the same calm laws.".into()),
+            (
+                Color::DarkGrey,
+                " Soft excitation | limited energy | sparse activity".into(),
+            ),
+            (
+                Color::DarkGrey,
+                format!(" {:23} {:>11} {:>11}", "", "A", "B"),
+            ),
+        ];
+        if let Some(metrics) = self.snapshot.metrics {
+            for (label, values, unit) in metrics {
+                let number = |value: f64| {
+                    if unit == "count" {
+                        format!("{value:.0}")
+                    } else {
+                        format!("{value:.4}")
+                    }
+                };
+                lines.push((
+                    Color::White,
+                    format!(
+                        " {:23} {:>11} {:>11}",
+                        label,
+                        number(values[0]),
+                        number(values[1])
+                    ),
+                ));
+            }
+        }
+        lines.push((
+            Color::DarkGrey,
+            " Search balances low roughness and varied resonances.".into(),
+        ));
+        lines.push((
+            Color::Cyan,
+            format!(
+                " {:6.1} dBFS | peak {:.3}",
+                20.0 * self.snapshot.rms.max(1e-9).log10(),
+                self.snapshot.peak
+            ),
+        ));
+        if self.snapshot.invalid_samples > 0 {
+            lines.push((
+                Color::Red,
+                " Invalid audio; paused. Press r to restart.".into(),
+            ));
+        } else if let Some(notice) = &self.notice {
+            lines.push((Color::Yellow, format!(" {notice}")));
+        }
+        lines.push((
+            Color::DarkGrey,
+            " a/b compare | e keep and evolve | s save".into(),
+        ));
+        lines.push((
+            Color::DarkGrey,
+            " Space pause | +/- volume | r replay | n new seed".into(),
+        ));
+        lines.push((
+            Color::DarkGrey,
+            " Saves go in discoveries/ | q / Esc quit".into(),
+        ));
+        lines
     }
 
     fn lines(&self, device: &str, sr: u32) -> Vec<(Color, String)> {
+        if self.discovery.is_some() {
+            return self.discovery_lines(device, sr);
+        }
         let mut lines = vec![
             (Color::Cyan, " ripple / a world you can hear".into()),
             (Color::DarkGrey, format!(" {device} | {sr} Hz")),
@@ -278,7 +455,7 @@ impl Ui {
                 format!(
                     " {}: {} | {:.1}s | volume {:.0}%",
                     if self.paused { "Paused " } else { "Playing" },
-                    presets::PRESETS[self.playing].name,
+                    self.name(),
                     self.snapshot.seconds,
                     self.volume * 100.0
                 ),
@@ -329,7 +506,23 @@ impl Ui {
     fn draw(&self, device: &str, sr: u32) -> io::Result<()> {
         let (width, height) = terminal::size()?;
         let mut stdout = io::stdout().lock();
-        let lines = if width < 54 || height < 20 {
+        let lines = if (width < 54 || height < 20) && self.discovery.is_some() {
+            vec![
+                (Color::Cyan, " ripple / alien discovery".into()),
+                (
+                    Color::White,
+                    format!(
+                        " {} | {:.1}s",
+                        if self.paused { "paused" } else { "playing" },
+                        self.snapshot.seconds
+                    ),
+                ),
+                (Color::White, " Resize to 54 x 20 for details.".into()),
+                (Color::DarkGrey, " a/b compare | e evolve | s save".into()),
+                (Color::DarkGrey, " Space pause | +/- | r replay".into()),
+                (Color::DarkGrey, " n new seed | q quit".into()),
+            ]
+        } else if width < 54 || height < 20 {
             vec![
                 (Color::Cyan, " ripple / a world you can hear".into()),
                 (
@@ -376,6 +569,14 @@ impl Ui {
 }
 
 pub fn run(name: &str, seed: u32) -> Result<()> {
+    play(name, seed, None)
+}
+
+pub fn discover(discovery: alien::Discovery) -> Result<()> {
+    play(presets::DEFAULT, discovery.seed, Some(discovery))
+}
+
+fn play(name: &str, seed: u32, discovery: Option<alien::Discovery>) -> Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err("the world player needs an interactive terminal; run ripple in your terminal or use `ripple render`".into());
     }
@@ -390,13 +591,24 @@ pub fn run(name: &str, seed: u32) -> Result<()> {
     let config: cpal::StreamConfig = supported.clone().into();
     let sr = config.sample_rate.0;
     let device_name = device.name().unwrap_or_else(|_| "default output".into());
-    println!("Preparing {name}...");
-    let world = presets::build(name, sr as f32, seed).unwrap();
+    if discovery.is_some() && sr < 8000 {
+        return Err("alien discovery needs an audio sample rate of at least 8000 Hz".into());
+    }
+    println!(
+        "Preparing {}...",
+        if discovery.is_some() {
+            "alien discovery"
+        } else {
+            name
+        }
+    );
+    let world = Source::build(start, sr as f32, seed, discovery.as_ref());
+    let metrics = world.metrics();
     let (commands_tx, commands_rx) = mpsc::sync_channel(32);
     let (snapshots_tx, snapshots_rx) = mpsc::sync_channel(4);
     let (retired_tx, retired_rx) = mpsc::sync_channel(4);
     let (errors_tx, errors_rx) = mpsc::sync_channel(1);
-    let (loaded_tx, loaded_rx) = mpsc::channel();
+    let (loaded_tx, loaded_rx) = mpsc::channel::<(u64, usize, Source)>();
     let player = Player::new(world, sr as f32, commands_rx, snapshots_tx, retired_tx);
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => make_stream::<f32>(&device, &config, player, errors_tx)?,
@@ -415,7 +627,13 @@ pub fn run(name: &str, seed: u32) -> Result<()> {
         loading: None,
         pending_load: None,
         building: false,
-        snapshot: Snapshot::default(),
+        snapshot: Snapshot {
+            metrics,
+            ..Snapshot::default()
+        },
+        discovery,
+        condition: 1,
+        notice: None,
     };
     stream.play()?;
     let mut last_draw = Instant::now() - Duration::from_secs(1);
@@ -426,9 +644,11 @@ pub fn run(name: &str, seed: u32) -> Result<()> {
         if let Ok(error) = errors_rx.try_recv() {
             return Err(format!("audio output failed: {error}").into());
         }
-        for (generation, selection, world) in loaded_rx.try_iter() {
+        for (generation, selection, mut world) in loaded_rx.try_iter() {
             ui.building = false;
             if generation == ui.generation {
+                world.select(ui.condition);
+                let metrics = world.metrics();
                 commands_tx.send(Command::Replace {
                     generation,
                     world,
@@ -438,6 +658,7 @@ pub fn run(name: &str, seed: u32) -> Result<()> {
                 ui.loading = None;
                 ui.snapshot = Snapshot {
                     generation,
+                    metrics,
                     ..Snapshot::default()
                 };
             }
@@ -445,12 +666,11 @@ pub fn run(name: &str, seed: u32) -> Result<()> {
         // At most one build runs. Rapid selection changes overwrite one pending
         // request rather than spawning competing terrain simulations.
         if !ui.building {
-            if let Some((generation, selection, seed)) = ui.pending_load.take() {
+            if let Some((generation, selection, seed, discovery)) = ui.pending_load.take() {
                 ui.building = true;
                 let sender = loaded_tx.clone();
                 std::thread::spawn(move || {
-                    let world =
-                        presets::build(presets::PRESETS[selection].name, sr as f32, seed).unwrap();
+                    let world = Source::build(selection, sr as f32, seed, discovery.as_ref());
                     let _ = sender.send((generation, selection, world));
                 });
             }
@@ -484,14 +704,46 @@ pub fn run(name: &str, seed: u32) -> Result<()> {
                     break;
                 }
                 match code {
-                    KeyCode::Up | KeyCode::Char('k') => {
+                    KeyCode::Up | KeyCode::Char('k') if ui.discovery.is_none() => {
                         ui.cursor =
                             (ui.cursor + presets::PRESETS.len() - 1) % presets::PRESETS.len()
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
+                    KeyCode::Down | KeyCode::Char('j') if ui.discovery.is_none() => {
                         ui.cursor = (ui.cursor + 1) % presets::PRESETS.len()
                     }
-                    KeyCode::Enter => ui.request_world(ui.cursor),
+                    KeyCode::Enter if ui.discovery.is_none() => ui.request_world(ui.cursor),
+                    KeyCode::Char('a' | 'A' | 'b' | 'B') | KeyCode::Left | KeyCode::Right
+                        if ui.discovery.is_some() && ui.loading.is_none() =>
+                    {
+                        ui.condition =
+                            usize::from(matches!(code, KeyCode::Char('b' | 'B') | KeyCode::Right));
+                        commands_tx.send(Command::Condition(ui.condition))?;
+                    }
+                    KeyCode::Char('e') if ui.discovery.is_some() && ui.loading.is_none() => {
+                        match ui.discovery.as_mut().unwrap().keep(ui.condition) {
+                            Ok(()) => {
+                                ui.condition = 1;
+                                ui.request_world(ui.playing);
+                            }
+                            Err(error) => ui.notice = Some(error.to_string()),
+                        }
+                    }
+                    KeyCode::Char('s') if ui.discovery.is_some() && ui.loading.is_none() => {
+                        ui.notice = Some(
+                            match ui
+                                .discovery
+                                .as_ref()
+                                .unwrap()
+                                .save(std::path::Path::new("discoveries"))
+                            {
+                                Ok(path) => format!(
+                                    "Saved: {}",
+                                    path.file_name().unwrap().to_string_lossy()
+                                ),
+                                Err(error) => format!("Save failed: {error}"),
+                            },
+                        );
+                    }
                     KeyCode::Char(' ') => {
                         ui.paused = !ui.paused;
                         commands_tx.send(Command::Pause(ui.paused))?;
@@ -507,6 +759,10 @@ pub fn run(name: &str, seed: u32) -> Result<()> {
                     KeyCode::Char('r') | KeyCode::Char('n') => {
                         if code == KeyCode::Char('n') {
                             ui.seed = crate::fresh_seed();
+                            if ui.discovery.is_some() {
+                                ui.discovery = Some(alien::Discovery::new(ui.seed));
+                                ui.condition = 1;
+                            }
                         }
                         ui.request_world(ui.playing);
                     }
@@ -530,7 +786,7 @@ mod tests {
         Player,
         SyncSender<Command>,
         Receiver<Snapshot>,
-        Receiver<World>,
+        Receiver<Source>,
     ) {
         let (tx, rx) = mpsc::sync_channel(32);
         let (snapshot_tx, snapshot_rx) = mpsc::sync_channel(4);
@@ -575,7 +831,7 @@ mod tests {
             .send(Command::Replace {
                 generation: 1,
                 paused: false,
-                world: presets::build("mountain", 48_000.0, 12345).unwrap(),
+                world: presets::build("mountain", 48_000.0, 12345).unwrap().into(),
             })
             .unwrap();
         player.begin_buffer();

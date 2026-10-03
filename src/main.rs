@@ -3,6 +3,7 @@
 //! choose a world and listen to it evolve.
 
 mod acoustics;
+mod alien;
 mod audio;
 mod bubbles;
 mod contacts;
@@ -38,6 +39,13 @@ fn print_help() {
 
 usage:
   ripple [world]              open the live world player (default: {default})
+  ripple discover [file.alien]
+                             discover calm resonator networks, or reopen a saved pair
+  ripple atlas [directory]    browse and discover full alien worlds
+  ripple scout [count] [directory]
+                             explore offline (default: 24 candidates, discoveries/atlas)
+  ripple render-alien <file.world> <out.wav> [seconds]
+                             render a saved alien world (default: 30 seconds)
   ripple list                list worlds
   ripple render [world] [out.wav] [seconds]
                              render a world (default: {default}, ripple.wav, 30)
@@ -55,7 +63,23 @@ live controls:
   +/-                 volume
   r                   restart with the same seed
   n                   restart with a new seed
-  q or Esc            quit"#,
+  q or Esc            quit
+
+discovery controls:
+  a/b                 compare parent / automatically selected descendant
+  e                   keep the audible candidate and search its descendants
+  s                   save the pair and lineage in discoveries/
+  Space, +/-, r, n, q work as in the world player.
+  Saved discoveries contain their seed; do not combine a file with --seed.
+
+atlas controls:
+  Up/Down or j/k      browse saved worlds; Enter listens
+  f / Tab             favourite / cycle Atlas, Favourites, All saved
+  g                   explore 24 global candidates
+  e                   explore 12 neighbours of the highlighted world
+  p / x               revisit parent / cancel search
+  Space, +/-, r, q     pause, volume, replay, quit
+  Accepted worlds save automatically; favourites survive further searches."#,
         default = presets::DEFAULT
     );
 }
@@ -131,6 +155,91 @@ fn main() -> Result<()> {
         Some("--help") | Some("-h") => {
             print_help();
             Ok(())
+        }
+        Some("discover") => {
+            check_length(&args, 2, "ripple discover [file.alien] [--seed <u32>]")?;
+            let discovery = match args.get(1) {
+                Some(path) => {
+                    if seed.is_some() {
+                        return Err("a saved discovery contains its seed; omit --seed".into());
+                    }
+                    alien::Discovery::load(std::path::Path::new(path))?
+                }
+                None => alien::Discovery::new(seed.unwrap_or_else(fresh_seed)),
+            };
+            tui::discover(discovery)
+        }
+        Some("atlas") => {
+            check_length(&args, 2, "ripple atlas [directory] [--seed <u32>]")?;
+            let directory = args
+                .get(1)
+                .map(String::as_str)
+                .unwrap_or(alien::atlas::DEFAULT_DIRECTORY);
+            tui::library::run(
+                std::path::Path::new(directory),
+                seed.unwrap_or_else(fresh_seed),
+            )
+        }
+        Some("scout") => {
+            check_length(&args, 3, "ripple scout [count] [directory] [--seed <u32>]")?;
+            let count = args
+                .get(1)
+                .map(|s| s.parse::<usize>())
+                .transpose()?
+                .unwrap_or(24);
+            if !(1..=512).contains(&count) {
+                return Err("candidate count must be between 1 and 512".into());
+            }
+            let directory = args
+                .get(2)
+                .map(String::as_str)
+                .unwrap_or(alien::atlas::DEFAULT_DIRECTORY);
+            let mut library = alien::atlas::Library::open(std::path::Path::new(directory))?;
+            for warning in &library.warnings {
+                eprintln!("Skipped: {warning}");
+            }
+            let seed = seed.unwrap_or_else(fresh_seed);
+            println!("Exploring with seed {seed}; saving in {directory}");
+            library.scout(
+                seed,
+                count,
+                None,
+                &std::sync::atomic::AtomicBool::new(false),
+                |p, entry| {
+                    if let Some(e) = entry {
+                        println!("  {} {}", e.id(), e.character.label());
+                    }
+                    println!(
+                        "{}/{} explored | {} kept | {} regions | {} rejected",
+                        p.done, p.total, p.accepted, p.occupied, p.rejected
+                    );
+                    if let Some(error) = p.last_error {
+                        eprintln!("Last rejected candidate: {error}");
+                    }
+                    true
+                },
+            )?;
+            Ok(())
+        }
+        Some("render-alien") => {
+            check_length(
+                &args,
+                4,
+                "ripple render-alien <file.world> <out.wav> [seconds]",
+            )?;
+            if seed.is_some() {
+                return Err("a saved world contains its seed; omit --seed".into());
+            }
+            let input = args
+                .get(1)
+                .ok_or("render-alien needs a saved .world file")?;
+            let output = args.get(2).ok_or("render-alien needs an output WAV path")?;
+            let entry = alien::atlas::Entry::load(std::path::Path::new(input))?;
+            alien::atlas::render(
+                &entry,
+                std::path::Path::new(output),
+                duration(args.get(3), 30.0)?,
+            )
         }
         Some(command @ ("probe" | "sync")) => {
             check_length(&args, 3, "ripple probe|sync [world] [seconds]")?;

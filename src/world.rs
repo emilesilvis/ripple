@@ -17,6 +17,9 @@ use crate::sky::{Climate, Sky};
 use crate::voices::{Eddies, Turbulence};
 use std::f32::consts::TAU;
 
+mod assembly;
+pub use assembly::{PhysicsReport, ResonantBody};
+
 /// Minnaert's law: an air bubble of radius r in water rings at ~3.26/r Hz·m.
 /// Every plink and burble in the world gets its pitch from this one line.
 fn minnaert_hz(radius_m: f32) -> f32 {
@@ -128,6 +131,7 @@ pub struct World {
     // Transient pools.
     bubbles: Vec<Bubble>,
     clouds: Vec<BubbleCloud>,
+    cloud_events: u64,
 
     control_seconds: f64,
 
@@ -180,6 +184,7 @@ impl World {
             fire_gain: 0.0,
             bubbles: vec![Bubble::inactive(sr); 24],
             clouds: vec![BubbleCloud::new(sr); 24],
+            cloud_events: 0,
             control_seconds: 0.0,
             choruses: Vec::new(),
             rain_gain: 0.0,
@@ -407,6 +412,7 @@ impl World {
                 } => {
                     if let Some(cloud) = self.clouds.iter_mut().find(|cloud| !cloud.is_active()) {
                         cloud.spawn(radius_m, energy, pan);
+                        self.cloud_events += 1;
                     }
                 }
                 Event::Break { pan, energy } => {
@@ -419,6 +425,7 @@ impl World {
                     if let Some(cloud) = self.clouds.iter_mut().find(|cloud| !cloud.is_active()) {
                         let radius_m = 0.003 + 0.006 * (energy / 0.6).clamp(0.0, 1.0);
                         cloud.spawn(radius_m, energy * 0.15, pan);
+                        self.cloud_events += 1;
                     }
                 }
             }
