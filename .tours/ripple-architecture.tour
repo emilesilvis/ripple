@@ -1,0 +1,146 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "Ripple Architecture: From World State to Sound",
+  "steps": [
+    {
+      "file": "README.md",
+      "pattern": "^# ripple",
+      "description": "Start here for the core idea: ripple is not a catalog of authored sound effects. It runs a small simulated world, then derives sound from water, air, matter, creatures, and space."
+    },
+    {
+      "file": "README.md",
+      "pattern": "^## Architecture",
+      "description": "The architecture table is the quickest module map. The runtime path is: CLI -> preset -> World -> physics/control update -> per-sample audio readout."
+    },
+    {
+      "file": "src/main.rs",
+      "pattern": "^fn main\\(",
+      "description": "The CLI dispatches here. `list`, `probe`, `sync`, `render`, and default live playback all end up building a named preset world at a chosen sample rate."
+    },
+    {
+      "file": "src/presets.rs",
+      "pattern": "^pub const PRESETS",
+      "description": "`PRESETS` is the public list of worlds. Each name is later matched in `build`, where terrain, climate, active sound sources, and critters are assembled."
+    },
+    {
+      "file": "src/presets.rs",
+      "pattern": "^pub fn build\\(",
+      "description": "`build` is the composition layer. A preset does not author a final mix; it sets initial conditions and enables physical subsystems such as stream, rain, wind, chimes, surf, or chorus."
+    },
+    {
+      "file": "src/world.rs",
+      "pattern": "^pub struct World",
+      "description": "`World` owns the running simulation: field water, sky/weather, turbulent voices, struck bodies, bubbles, critter choruses, reverb spaces, and a tiny control-rate scheduler."
+    },
+    {
+      "file": "src/world.rs",
+      "pattern": "^    pub fn new\\(",
+      "description": "`World::new` wires the default state. Notice that most optional sound sources are `None`; presets turn them on explicitly through the assembly methods below."
+    },
+    {
+      "file": "src/world.rs",
+      "pattern": "^    pub fn enable_stream\\(",
+      "description": "The `enable_*` and `add_*` methods translate preset intent into physical models. For example, wind, stream, surf, leaves, and flame are all `Turbulence` with different eddy scales."
+    },
+    {
+      "file": "src/world.rs",
+      "pattern": "^    fn step_controls\\(",
+      "description": "`step_controls` is the slower physics tick. Every 32 audio samples it advances weather and water, creates rain impacts and bubbles, drives turbulence, strikes chimes, and triggers fire pops."
+    },
+    {
+      "file": "src/world.rs",
+      "pattern": "^    pub fn next_sample\\(",
+      "description": "`next_sample` is the audio readout. It calls `step_controls` when needed, then sums continuous fluids, ringing bodies, bubbles, living voices, and the surrounding space into a stereo sample."
+    },
+    {
+      "file": "src/field.rs",
+      "pattern": "^pub struct Field",
+      "description": "`Field` is the shallow-water grid: terrain height, water depth, x/y flux, roughness, surfaces, springs/drains, ocean swell, and generated water events."
+    },
+    {
+      "file": "src/field.rs",
+      "pattern": "^    pub fn step\\(",
+      "description": "`Field::step` is the water law. It updates flux from surface-height gradients, limits outflow so cells cannot go negative, moves water, and then detects audible events."
+    },
+    {
+      "file": "src/field.rs",
+      "pattern": "^    fn detect_events\\(",
+      "description": "`detect_events` turns motion into discrete sound causes: fast water over rough rock makes bubble events, and shoaling waves create break events for surf."
+    },
+    {
+      "file": "src/field.rs",
+      "pattern": "^    pub fn geology\\(",
+      "description": "`geology` runs before the audible world starts. The same water simulation erodes raw terrain by stream power, marks rough/scoured rock, drains the epoch, and leaves geography for the listener to hear."
+    },
+    {
+      "file": "src/voices.rs",
+      "pattern": "^pub const STROUHAL",
+      "description": "Fluid voices share the Strouhal constant. A turbulent source stores eddy size and reference flow speed; pitch follows `f = St * v / l` rather than a hand-picked oscillator frequency."
+    },
+    {
+      "file": "src/voices.rs",
+      "pattern": "^impl Turbulence",
+      "description": "`Turbulence` is a bandpassed-noise renderer for unresolved eddy cascades. Control updates drive loudness and center frequency; sample processing emits stereo air/water/flame texture."
+    },
+    {
+      "file": "src/matter.rs",
+      "pattern": "^pub struct Matter",
+      "description": "`Matter` is deliberately tiny: wave speed, internal loss, and air loss. The audible difference between steel and wood mostly comes from loss, while body geometry supplies the modes."
+    },
+    {
+      "file": "src/matter.rs",
+      "pattern": "^pub fn bar_length_for_pitch\\(",
+      "description": "`bar_length_for_pitch` is the chime-maker step. A preset may request a pitch, but that pitch becomes only a bar length; the lattice itself produces the overtone structure."
+    },
+    {
+      "file": "src/matter.rs",
+      "pattern": "^pub struct Body",
+      "description": "`Body` is matter poured into a bar or sheet lattice. Its displacement and velocity arrays are integrated directly, so strikes, clicks, decay, stereo pickup, and overtones emerge from the model."
+    },
+    {
+      "file": "src/matter.rs",
+      "pattern": "^    fn step_sub\\(",
+      "description": "`step_sub` applies the bending operator, stiffness-proportional damping, air loss, and the mounting spring. The code substeps stiff bodies to keep high-frequency modes stable."
+    },
+    {
+      "file": "src/critters.rs",
+      "pattern": "^pub struct Species",
+      "description": "`Species` is where living voices are intentionally authored: base pitch, song shape, timing, stereo spread, and reverb behavior. Unlike matter and fluids, individual animal calls are genes."
+    },
+    {
+      "file": "src/critters.rs",
+      "pattern": "^pub struct Chorus",
+      "description": "`Chorus` is the emergent part of critters. Multiple agents process together, and positive or negative coupling lets rhythms synchronize or alternate."
+    },
+    {
+      "file": "src/sky.rs",
+      "pattern": "^pub struct Sky",
+      "description": "`Sky` is slow world state: wind, gusts, rainfall, and day/night phase. It makes no sound directly; `World::step_controls` reads it to drive the audible systems."
+    },
+    {
+      "file": "src/dsp.rs",
+      "pattern": "^pub struct Space",
+      "description": "`Space` is the propagation stand-in: a compact Schroeder-style reverb. The world sends selected sources into left and right spaces so terrain answers back around the listener."
+    },
+    {
+      "file": "src/audio.rs",
+      "pattern": "^pub fn render_wav\\(",
+      "description": "`render_wav` is the offline sink. It repeatedly asks the world for stereo samples, writes 16-bit WAV frames, and reports peak/RMS for sanity."
+    },
+    {
+      "file": "src/audio.rs",
+      "pattern": "^pub fn run_live\\(",
+      "description": "`run_live` is the live sink. CPAL chooses the output device format, then the callback pulls `world.next_sample()` for each output frame."
+    },
+    {
+      "file": "src/matter.rs",
+      "pattern": "^    fn tuned_bar_rings_at_free_bar_ratios\\(",
+      "description": "The tests are worth reading because they encode the project’s claim: a tuned steel bar should ring near the free-bar ratios, and material loss should produce different decay behavior without hard-coded envelopes."
+    },
+    {
+      "file": "src/presets.rs",
+      "pattern": "^    fn a_channel_is_carved_and_a_brook_runs_in_it\\(",
+      "description": "This integration test checks a second emergence claim: the brook world starts from an unmarked slope, runs geology, scours rock, then produces measurable flow."
+    }
+  ]
+}
