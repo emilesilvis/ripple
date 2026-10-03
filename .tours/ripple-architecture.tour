@@ -15,12 +15,32 @@
     {
       "file": "src/main.rs",
       "pattern": "^fn main\\(",
-      "description": "The CLI routes named-world playback and diagnostics, the original discover A/B experiment, atlas browsing, offline scout batches, and render-alien exports. Seeded search depends on its starting library; saved world recipes replay independently of later searches."
+      "description": "The CLI routes named-world playback and diagnostics, the original discover A/B experiment, atlas browsing, offline scout batches, render-alien exports, and structured event traces. Seeded search depends on its starting library; saved world recipes replay independently of later searches."
     },
     {
       "file": "src/tui.rs",
       "pattern": "^pub fn run\\(",
       "description": "The terminal player handles world selection, pause, volume and seeded restarts. World construction stays outside the CPAL callback; the callback owns playback, and the UI thread disposes of retired worlds after a scene change."
+    },
+    {
+      "file": "src/events.rs",
+      "pattern": "^pub enum Kind",
+      "description": "Typed observations describe actual contacts, call onsets and delayed hearing, rain, bubbles, fire, and A/B excitation. Continuous weather and water/sediment state are sampled once per second. Capture consumes no randomness and never drives physics; the offline trace command writes these same records as JSON lines."
+    },
+    {
+      "file": "src/tui.rs",
+      "pattern": "^    fn publish_events\\(",
+      "description": "The audio callback sends fixed-size batches through a bounded channel without waiting. Capture and transport overflow are counted explicitly. Playback generation IDs keep old-world events out of a new timeline. Formatting and history allocation stay on the UI thread."
+    },
+    {
+      "file": "src/tui/event_view.rs",
+      "pattern": "^pub\\(super\\) struct EventView",
+      "description": "Press l in any player to open a scrolling event log. Filtering and holding the view do not pause the simulation; Space does. A bounded recent history, missed-event count, and separate held snapshot keep the display useful without allowing it to slow audio."
+    },
+    {
+      "file": "src/tui/activity.rs",
+      "pattern": "^pub\\(super\\) struct Activity",
+      "description": "The main screens aggregate those observations into bounded 100 ms bins. Recent callers, heard connections, physical activity and retained-water/sediment readings expose evolving interactions. A 20-second activity history scales to its displayed peak. Filtering or holding the log cannot change these summaries; simulation pause and playback generation changes govern their clocks and resets."
     },
     {
       "file": "src/presets.rs",

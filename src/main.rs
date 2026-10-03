@@ -9,6 +9,7 @@ mod bubbles;
 mod contacts;
 mod critters;
 mod dsp;
+mod events;
 mod field;
 mod matter;
 mod presets;
@@ -53,6 +54,8 @@ usage:
                              inspect field physics (default: {default}, 20)
   ripple sync [world] [seconds]
                              inspect chorus clocks (default: night-meadow, 60)
+  ripple trace [world|file.world] [seconds]
+                             emit simulation events as JSON lines (default: {default}, 10)
 
 --seed <u32> is accepted anywhere. A fresh seed is chosen unless supplied.
 
@@ -63,7 +66,15 @@ live controls:
   +/-                 volume
   r                   restart with the same seed
   n                   restart with a new seed
+  l                   toggle the live event log (in every player)
   q or Esc            quit
+
+event log controls:
+  Tab / Shift-Tab     filter All, Calls, Contacts, Water, Weather, Resonators
+  h / End             hold the view / return to the live tail
+  Arrows or PgUp/Dn    scroll history; audio keeps playing
+  Space, +/-, r, q     pause audio, volume, restart, quit
+  l                   return to the player
 
 discovery controls:
   a/b                 compare parent / automatically selected descendant
@@ -240,6 +251,26 @@ fn main() -> Result<()> {
                 std::path::Path::new(output),
                 duration(args.get(3), 30.0)?,
             )
+        }
+        Some("trace") => {
+            check_length(&args, 3, "ripple trace [world|file.world] [seconds]")?;
+            let name = args.get(1).map(String::as_str).unwrap_or(presets::DEFAULT);
+            let seconds = duration(args.get(2), 10.0)?;
+            let world = if std::path::Path::new(name)
+                .extension()
+                .is_some_and(|e| e == "world")
+            {
+                if seed.is_some() {
+                    return Err("a saved world contains its seed; omit --seed".into());
+                }
+                alien::atlas::Entry::load(std::path::Path::new(name))?
+                    .spec
+                    .build(48_000.0)?
+            } else {
+                check_world(name)?;
+                presets::build(name, 48_000.0, seed.unwrap_or_else(fresh_seed)).unwrap()
+            };
+            events::trace(world, 48_000, seconds, std::io::stdout().lock())
         }
         Some(command @ ("probe" | "sync")) => {
             check_length(&args, 3, "ripple probe|sync [world] [seconds]")?;

@@ -471,6 +471,8 @@ struct Landscape {
     released: u64,
     active_drivers: usize,
     gain: f64,
+    events: crate::events::EventLog,
+    candidate: u8,
 }
 
 impl Landscape {
@@ -514,6 +516,8 @@ impl Landscape {
             released: 0,
             active_drivers: 0,
             gain: 1.0,
+            events: crate::events::EventLog::new(sr),
+            candidate: 0,
         }
     }
 
@@ -553,6 +557,12 @@ impl Landscape {
                 self.start_cooldown = 0.35;
                 self.active_drivers += 1;
                 self.released += 1;
+                self.events.emit(crate::events::Kind::Excitation {
+                    candidate: self.candidate,
+                    node: i,
+                    started: true,
+                    duration: d.duration,
+                });
             }
             if d.elapsed >= d.duration {
                 continue;
@@ -560,6 +570,14 @@ impl Landscape {
             // Raised-cosine force amplitude: excitation starts and stops at rest.
             let envelope = (PI * d.elapsed / d.duration).sin().powi(2);
             d.elapsed += self.dt;
+            if d.elapsed >= d.duration {
+                self.events.emit(crate::events::Kind::Excitation {
+                    candidate: self.candidate,
+                    node: i,
+                    started: false,
+                    duration: d.duration,
+                });
+            }
             let mass = self.genome.nodes[i].mass;
             let mut impulse =
                 (self.rng.unit() * 2.0 - 1.0) * envelope * (0.5 * self.dt * mass).sqrt();
@@ -593,6 +611,15 @@ impl Landscape {
                 *sample += mode.v * self.structure.pickup[i][ear];
             }
         }
+        if self.events.summary_due() {
+            let energy = self.energy();
+            self.events.emit(crate::events::Kind::Resonators {
+                candidate: self.candidate,
+                energy,
+                weather: self.weather,
+            });
+        }
+        self.events.advance();
         ((out[0] * self.gain) as f32, (out[1] * self.gain) as f32)
     }
 }
@@ -630,6 +657,7 @@ impl LiveDemo {
         let mut landscapes = genomes.map(|g| Landscape::new(g, sr, discovery.seed));
         for (i, scene) in landscapes.iter_mut().enumerate() {
             scene.gain = target / rms[i];
+            scene.candidate = i as u8;
         }
         Self {
             landscapes,
@@ -641,6 +669,30 @@ impl LiveDemo {
 
     pub fn next_pair(&mut self) -> [(f32, f32); 2] {
         self.landscapes.each_mut().map(Landscape::next)
+    }
+
+    pub fn observe(&mut self) {
+        for scene in &mut self.landscapes {
+            scene.events.enable();
+        }
+    }
+
+    pub fn drain_events(&mut self, batch: &mut crate::events::Batch) {
+        for scene in &mut self.landscapes {
+            batch.lost += scene.events.take_lost();
+        }
+        while !batch.is_full() {
+            let index = match (
+                self.landscapes[0].events.peek(),
+                self.landscapes[1].events.peek(),
+            ) {
+                (Some(a), Some(b)) => usize::from(b.sample < a.sample),
+                (Some(_), None) => 0,
+                (None, Some(_)) => 1,
+                (None, None) => break,
+            };
+            batch.push(self.landscapes[index].events.pop().unwrap());
+        }
     }
 
     pub fn select(&mut self, condition: usize) {
@@ -785,6 +837,9 @@ mod tests {
     fn matching_and_switching_preserve_the_evolving_pair() {
         let mut demo = LiveDemo::new(48_000.0, 12345);
         let mut reference = LiveDemo::new(48_000.0, 12345);
+        demo.observe();
+        let mut last_sample = 0;
+        let mut starts = [0; 2];
         let mut squares = [0.0; 2];
         for frame in 0..(48_000.0 * MATCH_SECONDS) as usize {
             if frame % 48_000 == 0 {
@@ -795,9 +850,27 @@ mod tests {
             for (i, (l, r)) in reference.next_pair().into_iter().enumerate() {
                 squares[i] += (f64::from(l).powi(2) + f64::from(r).powi(2)) * 0.5;
             }
+            if frame % 256 == 255 || frame + 1 == (48_000.0 * MATCH_SECONDS) as usize {
+                let mut batch = crate::events::Batch::new(0);
+                demo.drain_events(&mut batch);
+                assert_eq!(batch.lost, 0);
+                for record in batch.records() {
+                    assert!(record.sample >= last_sample && record.sample <= frame as u64);
+                    last_sample = record.sample;
+                    if let crate::events::Kind::Excitation {
+                        candidate,
+                        started: true,
+                        ..
+                    } = record.event
+                    {
+                        starts[candidate as usize] += 1;
+                    }
+                }
+            }
         }
         assert!((squares[0] / squares[1] - 1.0).abs() < 1e-6);
         for i in 0..2 {
+            assert_eq!(starts[i], demo.landscapes[i].released);
             assert_eq!(
                 demo.landscapes[i].energy(),
                 reference.landscapes[i].energy()

@@ -14,7 +14,10 @@ use std::io::{self, IsTerminal, Write};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
+mod activity;
+mod event_view;
 pub mod library;
+use event_view::EventView;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 type Metrics = [(&'static str, [f64; 2], &'static str); 4];
@@ -50,6 +53,24 @@ impl Source {
             Self::Alien(demo) => demo.next_sample(),
             Self::Discovered(world) => world.next_sample(),
             Self::Silence => (0.0, 0.0),
+        }
+    }
+
+    fn observe(&mut self) {
+        match self {
+            Self::World(world) => world.observe(),
+            Self::Alien(demo) => demo.observe(),
+            Self::Discovered(world) => world.observe(),
+            Self::Silence => {}
+        }
+    }
+
+    fn drain_events(&mut self, batch: &mut crate::events::Batch) {
+        match self {
+            Self::World(world) => world.drain_events(batch),
+            Self::Alien(demo) => demo.drain_events(batch),
+            Self::Discovered(world) => world.drain_events(batch),
+            Self::Silence => {}
         }
     }
 
@@ -96,6 +117,8 @@ struct Player {
     snapshots: SyncSender<Snapshot>,
     retired: SyncSender<Source>,
     deferred_retirement: Option<Source>,
+    event_sender: Option<SyncSender<crate::events::Batch>>,
+    events_lost: u64,
     generation: u64,
     volume: f32,
     volume_target: f32,
@@ -124,6 +147,8 @@ impl Player {
             snapshots,
             retired,
             deferred_retirement: None,
+            event_sender: None,
+            events_lost: 0,
             generation: 0,
             volume: 0.0,
             volume_target: 0.7,
@@ -135,6 +160,27 @@ impl Player {
             squares: 0.0,
             invalid_samples: 0,
             clipped_samples: 0,
+        }
+    }
+
+    fn observing(mut self, sender: SyncSender<crate::events::Batch>) -> Self {
+        self.world.observe();
+        self.event_sender = Some(sender);
+        self
+    }
+
+    fn publish_events(&mut self) {
+        let Some(sender) = &self.event_sender else {
+            return;
+        };
+        let mut batch = crate::events::Batch::new(self.generation);
+        self.world.drain_events(&mut batch);
+        batch.lost += std::mem::take(&mut self.events_lost);
+        if batch.records().is_empty() && batch.lost == 0 {
+            return;
+        }
+        if let Err(TrySendError::Full(batch)) = sender.try_send(batch) {
+            self.events_lost = batch.lost + batch.records().len() as u64;
         }
     }
 
@@ -151,9 +197,13 @@ impl Player {
             match command {
                 Command::Replace {
                     generation,
-                    world,
+                    mut world,
                     paused,
                 } => {
+                    if self.event_sender.is_some() {
+                        world.observe();
+                    }
+                    self.events_lost = 0;
                     let old = std::mem::replace(&mut self.world, world);
                     if let Err(TrySendError::Full(old)) = self.retired.try_send(old) {
                         self.deferred_retirement = Some(old);
@@ -247,6 +297,7 @@ where
                     }
                 }
             }
+            player.publish_events();
         },
         move |error| {
             let _ = errors.try_send(error.to_string());
@@ -286,6 +337,7 @@ struct Ui {
     pending_load: Option<(u64, usize, u32, Option<alien::Discovery>)>,
     building: bool,
     snapshot: Snapshot,
+    events: EventView,
     discovery: Option<alien::Discovery>,
     condition: usize,
     notice: Option<String>,
@@ -313,10 +365,16 @@ impl Ui {
         }
     }
 
-    fn discovery_lines(&self, device: &str, sr: u32) -> Vec<(Color, String)> {
+    fn discovery_lines(
+        &self,
+        device: &str,
+        sr: u32,
+        width: u16,
+        height: u16,
+    ) -> Vec<(Color, String)> {
         let discovery = self.discovery.as_ref().unwrap();
         let mut lines = vec![
-            (Color::Cyan, " ripple / alien discovery".into()),
+            (Color::Cyan, " ripple / alien discovery | l live log".into()),
             (Color::DarkGrey, format!(" {device} | {sr} Hz")),
             (
                 Color::White,
@@ -341,7 +399,6 @@ impl Ui {
                     self.volume * 100.0
                 ),
             ),
-            (Color::White, String::new()),
             (
                 Color::Cyan,
                 format!(
@@ -349,11 +406,6 @@ impl Ui {
                     if self.condition == 0 { "[x]" } else { "[ ]" },
                     if self.condition == 1 { "[x]" } else { "[ ]" }
                 ),
-            ),
-            (Color::White, " Both follow the same calm laws.".into()),
-            (
-                Color::DarkGrey,
-                " Soft excitation | limited energy | sparse activity".into(),
             ),
             (
                 Color::DarkGrey,
@@ -381,10 +433,6 @@ impl Ui {
             }
         }
         lines.push((
-            Color::DarkGrey,
-            " Search balances low roughness and varied resonances.".into(),
-        ));
-        lines.push((
             Color::Cyan,
             format!(
                 " {:6.1} dBFS | peak {:.3}",
@@ -400,6 +448,13 @@ impl Ui {
         } else if let Some(notice) = &self.notice {
             lines.push((Color::Yellow, format!(" {notice}")));
         }
+        let rows = (height as usize).saturating_sub(lines.len() + 3).min(5);
+        lines.extend(self.events.activity_lines(
+            self.snapshot.seconds,
+            Some(self.condition),
+            width,
+            rows,
+        ));
         lines.push((
             Color::DarkGrey,
             " a/b compare | e keep and evolve | s save".into(),
@@ -415,14 +470,16 @@ impl Ui {
         lines
     }
 
-    fn lines(&self, device: &str, sr: u32) -> Vec<(Color, String)> {
+    fn lines(&self, device: &str, sr: u32, width: u16, height: u16) -> Vec<(Color, String)> {
         if self.discovery.is_some() {
-            return self.discovery_lines(device, sr);
+            return self.discovery_lines(device, sr, width, height);
         }
         let mut lines = vec![
-            (Color::Cyan, " ripple / a world you can hear".into()),
+            (
+                Color::Cyan,
+                " ripple / a world you can hear | l live log".into(),
+            ),
             (Color::DarkGrey, format!(" {device} | {sr} Hz")),
-            (Color::White, String::new()),
         ];
         for (i, preset) in presets::PRESETS.iter().enumerate() {
             lines.push((
@@ -440,7 +497,9 @@ impl Ui {
                 ),
             ));
         }
-        lines.push((Color::White, String::new()));
+        if height >= 24 {
+            lines.push((Color::White, String::new()));
+        }
         if let Some(i) = self.loading {
             lines.push((
                 Color::Yellow,
@@ -491,7 +550,19 @@ impl Ui {
                 " Output reached its limit; lower the volume with -.".into(),
             ));
         }
-        lines.push((Color::White, String::new()));
+        if height >= 24 {
+            lines.push((Color::White, String::new()));
+        }
+        let rows = (height as usize)
+            .saturating_sub(lines.len() + 2 + usize::from(height >= 24))
+            .min(5);
+        lines.extend(
+            self.events
+                .activity_lines(self.snapshot.seconds, None, width, rows),
+        );
+        if height >= 24 {
+            lines.push((Color::White, String::new()));
+        }
         lines.push((
             Color::DarkGrey,
             " Up/Down or j/k select | Enter play | Space pause".into(),
@@ -504,11 +575,23 @@ impl Ui {
     }
 
     fn draw(&self, device: &str, sr: u32) -> io::Result<()> {
+        if self.events.visible {
+            let title = if self.discovery.is_some() {
+                if self.condition == 0 {
+                    "A parent audible; A+B simulated"
+                } else {
+                    "B discovery audible; A+B simulated"
+                }
+            } else {
+                self.name()
+            };
+            return self.events.draw(title, self.snapshot.seconds, self.paused);
+        }
         let (width, height) = terminal::size()?;
         let mut stdout = io::stdout().lock();
         let lines = if (width < 54 || height < 20) && self.discovery.is_some() {
-            vec![
-                (Color::Cyan, " ripple / alien discovery".into()),
+            let mut lines = vec![
+                (Color::Cyan, " ripple / discovery | l log".into()),
                 (
                     Color::White,
                     format!(
@@ -517,14 +600,22 @@ impl Ui {
                         self.snapshot.seconds
                     ),
                 ),
-                (Color::White, " Resize to 54 x 20 for details.".into()),
+            ];
+            lines.extend(self.events.activity_lines(
+                self.snapshot.seconds,
+                Some(self.condition),
+                width,
+                (height as usize).saturating_sub(5).min(2),
+            ));
+            lines.extend([
                 (Color::DarkGrey, " a/b compare | e evolve | s save".into()),
                 (Color::DarkGrey, " Space pause | +/- | r replay".into()),
                 (Color::DarkGrey, " n new seed | q quit".into()),
-            ]
+            ]);
+            lines
         } else if width < 54 || height < 20 {
-            vec![
-                (Color::Cyan, " ripple / a world you can hear".into()),
+            let mut lines = vec![
+                (Color::Cyan, " ripple / worlds | l log".into()),
                 (
                     Color::White,
                     format!(
@@ -534,21 +625,21 @@ impl Ui {
                         self.snapshot.seconds
                     ),
                 ),
-                (
-                    Color::White,
-                    " Resize to at least 54 columns x 20 rows for details.".into(),
-                ),
-                (
-                    Color::DarkGrey,
-                    " Arrows select | Enter play | Space pause".into(),
-                ),
-                (
-                    Color::DarkGrey,
-                    " +/- volume | r restart | n seed | q quit".into(),
-                ),
-            ]
+            ];
+            lines.extend(self.events.activity_lines(
+                self.snapshot.seconds,
+                None,
+                width,
+                (height as usize).saturating_sub(5).min(2),
+            ));
+            lines.extend([
+                (Color::DarkGrey, " j/k select | Enter play".into()),
+                (Color::DarkGrey, " +/- | r restart | n seed".into()),
+                (Color::DarkGrey, " Space pause | q quit".into()),
+            ]);
+            lines
         } else {
-            self.lines(device, sr)
+            self.lines(device, sr, width, height)
         };
         for (row, (color, line)) in lines.into_iter().take(height as usize).enumerate() {
             let shown: String = line
@@ -606,10 +697,12 @@ fn play(name: &str, seed: u32, discovery: Option<alien::Discovery>) -> Result<()
     let metrics = world.metrics();
     let (commands_tx, commands_rx) = mpsc::sync_channel(32);
     let (snapshots_tx, snapshots_rx) = mpsc::sync_channel(4);
+    let (events_tx, events_rx) = mpsc::sync_channel(16);
     let (retired_tx, retired_rx) = mpsc::sync_channel(4);
     let (errors_tx, errors_rx) = mpsc::sync_channel(1);
     let (loaded_tx, loaded_rx) = mpsc::channel::<(u64, usize, Source)>();
-    let player = Player::new(world, sr as f32, commands_rx, snapshots_tx, retired_tx);
+    let player =
+        Player::new(world, sr as f32, commands_rx, snapshots_tx, retired_tx).observing(events_tx);
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => make_stream::<f32>(&device, &config, player, errors_tx)?,
         cpal::SampleFormat::I16 => make_stream::<i16>(&device, &config, player, errors_tx)?,
@@ -631,6 +724,7 @@ fn play(name: &str, seed: u32, discovery: Option<alien::Discovery>) -> Result<()
             metrics,
             ..Snapshot::default()
         },
+        events: EventView::default(),
         discovery,
         condition: 1,
         notice: None,
@@ -683,6 +777,10 @@ fn play(name: &str, seed: u32, discovery: Option<alien::Discovery>) -> Result<()
                 ui.snapshot = snapshot;
             }
         }
+        ui.events.set_generation(ui.snapshot.generation);
+        for batch in events_rx.try_iter() {
+            ui.events.receive(batch, ui.snapshot.generation);
+        }
         if last_draw.elapsed() >= Duration::from_millis(100) {
             ui.draw(&device_name, sr)?;
             last_draw = Instant::now();
@@ -702,6 +800,10 @@ fn play(name: &str, seed: u32, discovery: Option<alien::Discovery>) -> Result<()
                     || (code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
                 {
                     break;
+                }
+                if ui.events.handle_key(code) {
+                    last_draw = Instant::now() - Duration::from_secs(1);
+                    continue;
                 }
                 match code {
                     KeyCode::Up | KeyCode::Char('k') if ui.discovery.is_none() => {
@@ -819,6 +921,53 @@ mod tests {
         for _ in 0..4800 {
             assert_eq!(paused.next(), uninterrupted.next());
         }
+    }
+
+    #[test]
+    fn a_full_event_channel_preserves_audio_and_reports_loss_then_restarts_cleanly() {
+        let (base, commands, _, retired) = player();
+        let (mut reference, _, _, _) = player();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let mut observed = base.observing(sender);
+        for frame in 0..48_000 * 2 {
+            assert_eq!(observed.next(), reference.next());
+            if frame % 512 == 511 {
+                observed.publish_events();
+            }
+        }
+        assert!(observed.events_lost > 0);
+        let first = receiver.try_recv().unwrap();
+        assert_eq!(first.records()[0].sample, 0);
+        observed.publish_events();
+        assert!(receiver.try_recv().unwrap().lost > 0);
+        commands.send(Command::Pause(true)).unwrap();
+        observed.begin_buffer();
+        let elapsed = observed.elapsed_samples;
+        for _ in 0..512 {
+            assert_eq!(observed.next(), (0.0, 0.0));
+        }
+        observed.publish_events();
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(observed.elapsed_samples, elapsed);
+        commands
+            .send(Command::Replace {
+                generation: 9,
+                paused: false,
+                world: presets::build("mountain", 48_000.0, 12345).unwrap().into(),
+            })
+            .unwrap();
+        observed.begin_buffer();
+        drop(retired.try_recv().unwrap());
+        observed.next();
+        observed.publish_events();
+        let restarted = receiver.try_recv().unwrap();
+        assert_eq!(restarted.generation, 9);
+        assert_eq!(restarted.lost, 0);
+        assert_eq!(restarted.records()[0].sample, 0);
+        assert!(matches!(
+            restarted.records()[0].event,
+            crate::events::Kind::Started { seed: 12345 }
+        ));
     }
 
     #[test]

@@ -28,6 +28,7 @@ struct Browser {
     paused: bool,
     volume: f32,
     snapshot: Snapshot,
+    events: EventView,
     progress: Progress,
     searching: bool,
     local_search: bool,
@@ -78,7 +79,38 @@ impl Browser {
         }
     }
     fn draw(&self) -> io::Result<()> {
+        if self.events.visible {
+            return self.events.draw(
+                self.playing.as_deref().unwrap_or("preparing world"),
+                self.snapshot.seconds,
+                self.paused,
+            );
+        }
         let (width, height) = terminal::size()?;
+        let mut stdout = io::stdout().lock();
+        for (row, (color, line)) in self
+            .lines(width, height)
+            .into_iter()
+            .take(height as usize)
+            .enumerate()
+        {
+            let shown: String = line
+                .chars()
+                .take(width.saturating_sub(1) as usize)
+                .collect();
+            queue!(
+                stdout,
+                MoveTo(0, row as u16),
+                SetForegroundColor(color),
+                Clear(ClearType::CurrentLine),
+                Print(shown)
+            )?;
+        }
+        queue!(stdout, ResetColor, Clear(ClearType::FromCursorDown))?;
+        stdout.flush()
+    }
+
+    fn lines(&self, width: u16, height: u16) -> Vec<(Color, String)> {
         let ids = self.ids();
         let filter = match self.filter {
             Filter::Atlas => "Atlas",
@@ -86,7 +118,10 @@ impl Browser {
             Filter::All => "All saved",
         };
         let mut lines = vec![
-            (Color::Cyan, " ripple / alien world library".to_owned()),
+            (
+                Color::Cyan,
+                " ripple / alien world library | l live log".to_owned(),
+            ),
             (
                 Color::White,
                 format!(
@@ -123,7 +158,11 @@ impl Browser {
                 },
             ),
         ];
-        let rows = (height as usize).saturating_sub(12).max(1);
+        let activity = self
+            .events
+            .activity_lines(self.snapshot.seconds, None, width, 5);
+        let rows = (height as usize).saturating_sub(10 + activity.len()).max(1);
+        lines.extend(activity);
         let start = self
             .cursor
             .saturating_sub(rows / 2)
@@ -200,14 +239,21 @@ impl Browser {
         // Keep controls available in narrow terminals; no hidden modal dialog.
         if width < 60 || height < 16 {
             lines = vec![
-                (Color::Cyan, " ripple / alien library".into()),
+                (Color::Cyan, " ripple / alien library | l log".into()),
                 (
                     Color::White,
-                    format!(
-                        " {filter}: {} | {} saved",
-                        ids.len(),
-                        self.library.entries.len()
-                    ),
+                    if self.searching {
+                        format!(
+                            " Exploring {}/{} | x stop",
+                            self.progress.done, self.progress.total
+                        )
+                    } else {
+                        format!(
+                            " {filter}: {} | {} saved",
+                            ids.len(),
+                            self.library.entries.len()
+                        )
+                    },
                 ),
                 (
                     Color::White,
@@ -217,17 +263,11 @@ impl Browser {
                         self.snapshot.seconds
                     ),
                 ),
-                (
-                    Color::Yellow,
-                    if self.searching {
-                        format!(
-                            " Exploring {}/{} | x stop",
-                            self.progress.done, self.progress.total
-                        )
-                    } else {
-                        self.notice.clone()
-                    },
-                ),
+                self.events
+                    .activity_lines(self.snapshot.seconds, None, width, 1)
+                    .into_iter()
+                    .next()
+                    .unwrap(),
                 (
                     Color::White,
                     self.selected()
@@ -239,22 +279,7 @@ impl Browser {
                 (Color::DarkGrey, " Space pause | +/- | q quit".into()),
             ];
         }
-        let mut stdout = io::stdout().lock();
-        for (row, (color, line)) in lines.into_iter().take(height as usize).enumerate() {
-            let shown: String = line
-                .chars()
-                .take(width.saturating_sub(1) as usize)
-                .collect();
-            queue!(
-                stdout,
-                MoveTo(0, row as u16),
-                SetForegroundColor(color),
-                Clear(ClearType::CurrentLine),
-                Print(shown)
-            )?;
-        }
-        queue!(stdout, ResetColor, Clear(ClearType::FromCursorDown))?;
-        stdout.flush()
+        lines
     }
 }
 
@@ -319,6 +344,7 @@ pub fn run(directory: &Path, seed: u32) -> Result<()> {
     }
     let (commands_tx, commands_rx) = mpsc::sync_channel(32);
     let (snapshots_tx, snapshots_rx) = mpsc::sync_channel(4);
+    let (events_tx, events_rx) = mpsc::sync_channel(16);
     let (retired_tx, retired_rx) = mpsc::sync_channel(4);
     let (errors_tx, errors_rx) = mpsc::sync_channel(1);
     let player = Player::new(
@@ -327,7 +353,8 @@ pub fn run(directory: &Path, seed: u32) -> Result<()> {
         commands_rx,
         snapshots_tx,
         retired_tx,
-    );
+    )
+    .observing(events_tx);
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => make_stream::<f32>(&device, &config, player, errors_tx)?,
         cpal::SampleFormat::I16 => make_stream::<i16>(&device, &config, player, errors_tx)?,
@@ -347,6 +374,7 @@ pub fn run(directory: &Path, seed: u32) -> Result<()> {
         paused: false,
         volume: 0.7,
         snapshot: Snapshot::default(),
+        events: EventView::default(),
         progress: Progress::default(),
         searching: false,
         local_search: false,
@@ -460,6 +488,10 @@ pub fn run(directory: &Path, seed: u32) -> Result<()> {
                 browser.snapshot = snapshot;
             }
         }
+        browser.events.set_generation(browser.snapshot.generation);
+        for batch in events_rx.try_iter() {
+            browser.events.receive(batch, browser.snapshot.generation);
+        }
         if last_draw.elapsed() >= Duration::from_millis(100) {
             browser.draw()?;
             last_draw = Instant::now();
@@ -478,6 +510,10 @@ pub fn run(directory: &Path, seed: u32) -> Result<()> {
                     || (code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
                 {
                     break;
+                }
+                if browser.events.handle_key(code) {
+                    last_draw = Instant::now() - Duration::from_secs(1);
+                    continue;
                 }
                 let len = browser.ids().len().max(1);
                 match code {

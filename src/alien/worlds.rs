@@ -448,4 +448,10 @@ impl Soundscape {
     pub fn physics_report(&self) -> PhysicsReport {
         self.world.physics_report()
     }
+    pub fn observe(&mut self) {
+        self.world.observe();
+    }
+    pub fn drain_events(&mut self, batch: &mut crate::events::Batch) {
+        self.world.drain_events(batch);
+    }
 }

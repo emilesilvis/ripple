@@ -26,13 +26,25 @@ another world, the current audio continues while its terrain is prepared.
 | `+` / `-` | Adjust listening volume |
 | `r` | Restart the playing world with the same seed |
 | `n` | Restart the playing world with a new seed |
+| `l` | Open or close the live event log |
 | `q` / `Esc` | Quit |
 
 The screen shows the seed, elapsed simulation time, volume, and output level.
+It also shows a live activity summary: recent event rate, calling inhabitants,
+heard connections, contacts/bubbles/rain, water and sediment state, and a
+20-second activity graph. These observations follow the playing world. The
+original A/B player shows the audible candidate's force activity and energy.
 Pause freezes the world. Restart begins its history again. A fresh seed is
 chosen unless you supply `--seed <u32>`; the same seed and sample rate reproduce
 a world's evolution. Water and terrain history persist while a world runs;
 selecting or restarting a world creates a new simulation.
+
+Press **`l` in any player** to watch timestamped calls, hearing, contacts, rain,
+bubbles, and periodic weather/water readings as the simulation runs. `Tab`
+filters the log; `h` holds the view while audio continues; arrows or Page Up/Down
+scroll; `End` returns to the live tail. `Space` pauses the simulation itself.
+The view keeps the latest 2,048 records and reports any missed events.
+See [live events](docs/live-events.md) for coverage and structured export.
 
 ## Discover alien soundscapes
 
@@ -149,6 +161,7 @@ cargo build --release
 ./target/release/ripple render shore out.wav 30 --seed 12345
 ./target/release/ripple probe brook 20 --seed 12345
 ./target/release/ripple sync night-meadow 60 --seed 12345
+./target/release/ripple trace night-meadow 10 --seed 12345 > events.jsonl
 ```
 
 `render` writes stereo, 16-bit WAV at 48 kHz and reports peak and RMS level.
@@ -158,6 +171,10 @@ flow, water, rain, and history. `sync` advances the audible world and reports
 the first chorus's phase order, a measure of clock alignment from zero to
 one, alongside emitted, heard, and masked call counts. Order alone does not
 measure how many calls were heard.
+
+`trace` renders without an audio device and writes one event per JSON line to
+stdout, using simulation time at 48 kHz. It also accepts a saved `.world` path.
+It runs as fast as the simulation allows; the `l` view follows live playback.
 
 Tests check lattice overtones, geological channel formation, passive contact
 collisions and energy accounting, causal hearing and barriers, bubble modes
@@ -175,6 +192,9 @@ src/
   alien/analysis.rs rendered audio descriptors and calmness proxy
   alien/atlas.rs    diverse archive, immutable world files, and favourites
   tui/library.rs   browsing, playback, and background exploration
+  tui/event_view.rs scrolling live event log, filtering, and held views
+  tui/activity.rs  rolling activity, heard connections, and state summaries
+  events.rs     bounded event records and offline JSONL traces
   world/assembly.rs shared physical assembly interfaces and diagnostics
   audio.rs      checked offline WAV rendering
   dsp.rs        noise, filters, resonators, and reverb
