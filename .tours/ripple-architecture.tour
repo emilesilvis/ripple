@@ -15,12 +15,22 @@
     {
       "file": "src/main.rs",
       "pattern": "^fn main\\(",
-      "description": "The CLI entrypoint parses the selected world and seed, opens the terminal player, or routes an offline diagnostic through the same preset builder."
+      "description": "The CLI selects a world and seed, then opens the live player or runs `render`, `probe` or `sync` through the same preset builder. There is one production engine; each world chooses which physical systems are present."
+    },
+    {
+      "file": "src/main.rs",
+      "pattern": "^fn arguments\\(",
+      "description": "`--seed` is global, so the same seed works before or after any command. Without it, the program chooses a fresh seed. Rebuilding the same preset at the same sample rate with the same seed reproduces its initial conditions and random sequence; a restart begins that history again."
     },
     {
       "file": "src/tui.rs",
       "pattern": "^pub fn run\\(",
-      "description": "The terminal player handles world selection, pause, volume and seeded restarts. World construction stays outside the CPAL callback; the callback owns playback, and the UI thread disposes of retired worlds after a scene change."
+      "description": "The UI sends commands to the audio player and receives meters at 10 Hz. Initial construction happens before playback; later worlds build on a worker while the current world continues. Only one build runs at a time, pending requests coalesce, and generation IDs reject stale results. Retired worlds return to the UI for disposal."
+    },
+    {
+      "file": "src/tui.rs",
+      "pattern": "^    fn begin_buffer\\(",
+      "description": "`Player` owns the one audible `World`. At a buffer boundary, replacement swaps worlds, resets time and fade, and applies the requested pause state together. In `next` below, pause emits silence without advancing the simulation. The tests at the end of this file compare samples to verify pause continuity and seeded restart replay."
     },
     {
       "file": "src/presets.rs",
@@ -30,7 +40,7 @@
     {
       "file": "src/presets.rs",
       "pattern": "^pub fn build\\(",
-      "description": "`build` is the composition layer. A preset does not author a final mix; it sets initial conditions and enables physical subsystems such as stream, rain, wind, chimes, surf, or chorus."
+      "description": "`build` sets terrain, climate, sources and creatures rather than authoring a final mix. It completes each preset's geological preparation before enabling live water history once at the end. Every world uses the same engine, with different initial conditions and active systems."
     },
     {
       "file": "src/world.rs",
@@ -80,7 +90,12 @@
     {
       "file": "src/field.rs",
       "pattern": "^    pub fn enable_history\\(",
-      "description": "After geological preparation, presets enable ongoing history. Rain can be held in a soil reservoir; moving water transports sediment and changes the bed throughout playback, leaving consequences after the weather changes."
+      "description": "History begins from the prepared terrain. `rain_on` below retains up to 80% of rain falling on open soil, bounded by reservoir capacity; the rest reaches surface water. The reservoir releases exponentially over a 40-second timescale. This is a compact retention model, and its state lasts for the running world."
+    },
+    {
+      "file": "src/field.rs",
+      "pattern": "^    fn transport_sediment\\(",
+      "description": "Sediment rides the already-limited water flux: each transfer leaves one cell and enters its neighbour. `exchange_with_bed` below erodes or deposits material, updating terrain and exposed rock, which changes later flow and sound events. The tests track water and solid budgets and show that different rainfall histories remain distinct under identical later forcing."
     },
     {
       "file": "src/voices.rs",
@@ -115,12 +130,22 @@
     {
       "file": "src/contacts.rs",
       "pattern": "^pub struct ChimeRig",
-      "description": "The chime rig supplies encounters as well as voices. Wind drives suspended bodies and a clapper; impulse collisions transfer energy into the existing bar lattices. Its mechanical ledger tracks forcing, damping and collision loss."
+      "description": "Wind moves a suspended clapper and bars in a small-angle model. New contacts produce restitution impulses; sustained contact cannot invent repeated strikes. The mechanical ledger accounts for wind work, damping, collision loss and overlap correction. Tests check still-air silence, collision conservation, the driven energy budget and timestep sensitivity."
+    },
+    {
+      "file": "src/world.rs",
+      "pattern": "^            rig\\.step\\(",
+      "description": "Here the mechanics become audible. The rig converts a fraction of collision loss into a velocity kick at a contact position; this callback applies it to the struck bar lattice. Sheltered wind keeps suspension angles small. This is a one-way coupling: lattice vibration does not push back on the suspension."
     },
     {
       "file": "src/bubbles.rs",
       "pattern": "^pub struct BubbleCloud",
-      "description": "Water churn excites bounded packets of eight interacting bubbles. The input radius describes their total gas volume, and a precomputed coupled modal system supplies collective resonances without allocating during playback."
+      "description": "A cloud is eight bubbles coupled through fluid inertia, giving collective resonances. Their radii preserve the input gas volume. Mode shapes are solved at construction; playback uses exact damped modal updates without allocating. Tests recover analytic single/pair frequencies, check passive decay and verify that a collective spectral peak falls below every isolated member."
+    },
+    {
+      "file": "src/world.rs",
+      "pattern": "^        for ev in self\\.field\\.drain_events\\(\\)",
+      "description": "Fast-water bubble events and breaking-wave foam excite available cloud packets; breaks also drive continuous surf. Raindrops use a separate pool of isolated plinks. Event `energy` is a normalized impulse strength, not joules, and foam volume follows a coarse entrainment rule. The bounded pools make the water-to-audio seam explicit."
     },
     {
       "file": "src/critters.rs",
@@ -130,7 +155,12 @@
     {
       "file": "src/critters.rs",
       "pattern": "^pub struct Chorus",
-      "description": "A chorus steps voices at fixed positions. Actual emitted syllables enter a causal arrival queue; neighbours can nudge their clocks only after travel time and an audibility test against distance loss and background masking. Synchrony is measured rather than guaranteed."
+      "description": "A chorus owns individual voices, fixed positions, propagation paths and an arrival queue. Voices retain authored species rules, but their clocks can influence one another through audible calls. The listener receives delayed, attenuated waveforms from the same geometry; clock synchrony is measured rather than guaranteed."
+    },
+    {
+      "file": "src/critters.rs",
+      "pattern": "^    pub fn process\\(",
+      "description": "Receive arrivals before advancing voices. A call nudges its receiver only when its estimated level exceeds both the hearing threshold and twice the environmental masking floor. Actual syllable emission schedules later arrivals, including simultaneous callers. Tests prove that silent clock crossings send nothing, hearing follows emission plus travel time, and masking or distance can prevent a response."
     },
     {
       "file": "src/acoustics.rs",
@@ -150,7 +180,12 @@
     {
       "file": "src/audio.rs",
       "pattern": "^pub fn render_wav\\(",
-      "description": "`render_wav` is the offline sink. It repeatedly asks the world for stereo samples, writes 16-bit WAV frames, and reports peak/RMS for sanity."
+      "description": "`render_wav` is the offline sink for the same `World::next_sample` path. It checks finite floating-point output before writing 16-bit stereo WAV frames, reports peak/RMS, and fails on over-range output. Use a fixed seed when comparing a change; renders use 48 kHz while live playback uses the device rate."
+    },
+    {
+      "file": "src/world.rs",
+      "pattern": "^    pub fn probe\\(",
+      "description": "`probe` advances control physics without audio, exposing flow, stored water, weather and chime mechanics. `probe_sync` below advances the full sample timeline and reports the first chorus's clock order and emitted/heard/masked counts. A high clock order alone does not establish audible synchrony. Both commands accept a fixed seed."
     },
     {
       "file": "src/matter.rs",
@@ -161,6 +196,11 @@
       "file": "src/presets.rs",
       "pattern": "^    fn a_channel_is_carved_and_a_brook_runs_in_it\\(",
       "description": "This integration test checks a second emergence claim: the brook world starts from an unmarked slope, runs geology, scours rock, then produces measurable flow."
+    },
+    {
+      "file": "src/world.rs",
+      "pattern": "^    fn flowing_presets_drive_suspensions_clouds_and_active_history\\(",
+      "description": "Finish with the 30-second integration audit: flowing presets must stay finite, mobilize sediment, activate churn clouds where expected, and keep wind-driven chimes inside the small-angle range. This slower test is ignored by default; run all checks with `cargo test --release -- --include-ignored`. It verifies subsystem connections alongside the focused conservation, causality and replay tests."
     }
   ]
 }
