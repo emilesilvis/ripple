@@ -10,12 +10,12 @@
     {
       "file": "README.md",
       "pattern": "^## Architecture",
-      "description": "The architecture table is the quickest module map. The runtime path is: CLI and terminal player -> preset -> World -> physics/control update -> per-sample audio readout."
+      "description": "Two assembly paths share one runtime: named Earth presets and discovered alien recipes both build World. The atlas adds rendered-audio analysis, a diverse archive, and a persistent listening library. The older A/B resonator experiment remains a separate versioned model."
     },
     {
       "file": "src/main.rs",
       "pattern": "^fn main\\(",
-      "description": "The CLI selects a world and seed, then opens the live player or runs `render`, `probe` or `sync` through the same preset builder. There is one production engine; each world chooses which physical systems are present."
+      "description": "The CLI routes named-world playback and diagnostics, the original discover A/B experiment, atlas browsing, offline scout batches, render-alien exports, and structured event traces. Named and discovered full worlds share the preset/recipe runtime. Seeded search depends on its starting library; saved world recipes replay independently of later searches."
     },
     {
       "file": "src/main.rs",
@@ -30,7 +30,27 @@
     {
       "file": "src/tui.rs",
       "pattern": "^    fn begin_buffer\\(",
-      "description": "`Player` owns the one audible `World`. At a buffer boundary, replacement swaps worlds, resets time and fade, and applies the requested pause state together. In `next` below, pause emits silence without advancing the simulation. The tests at the end of this file compare samples to verify pause continuity and seeded restart replay."
+      "description": "`Player` owns the active audio source: a named World, a discovered full world, or the original A/B resonator pair. At a buffer boundary, replacement swaps sources, resets time and fade, and applies the requested pause state together. In `next` below, pause emits silence without advancing the simulation. The tests at the end of this file compare samples to verify pause continuity and seeded restart replay."
+    },
+    {
+      "file": "src/events.rs",
+      "pattern": "^pub enum Kind",
+      "description": "Typed observations describe actual contacts, call onsets and delayed hearing, rain, bubbles, fire, and A/B excitation. Continuous weather and water/sediment state are sampled once per second. Capture consumes no randomness and never drives physics; the offline trace command writes these same records as JSON lines."
+    },
+    {
+      "file": "src/tui.rs",
+      "pattern": "^    fn publish_events\\(",
+      "description": "The audio callback sends fixed-size batches through a bounded channel without waiting. Capture and transport overflow are counted explicitly. Playback generation IDs keep old-world events out of a new timeline. Formatting and history allocation stay on the UI thread."
+    },
+    {
+      "file": "src/tui/event_view.rs",
+      "pattern": "^pub\\(super\\) struct EventView",
+      "description": "Press l in any player to open a scrolling event log. Filtering and holding the view do not pause the simulation; Space does. A bounded recent history, missed-event count, and separate held snapshot keep the display useful without allowing it to slow audio."
+    },
+    {
+      "file": "src/tui/activity.rs",
+      "pattern": "^pub\\(super\\) struct Activity",
+      "description": "The main screens aggregate those observations into bounded 100 ms bins. Recent callers, heard connections, physical activity and retained-water/sediment readings expose evolving interactions. A 20-second activity history scales to its displayed peak. Filtering or holding the log cannot change these summaries; simulation pause and playback generation changes govern their clocks and resets."
     },
     {
       "file": "src/presets.rs",
@@ -40,7 +60,67 @@
     {
       "file": "src/presets.rs",
       "pattern": "^pub fn build\\(",
-      "description": "`build` sets terrain, climate, sources and creatures rather than authoring a final mix. It completes each preset's geological preparation before enabling live water history once at the end. Every world uses the same engine, with different initial conditions and active systems."
+      "description": "`build` sets terrain, climate, sources and creatures rather than authoring a final mix. It completes each preset's geological preparation before enabling live water history once at the end. All named worlds and full alien recipes use the shared World engine, with different initial conditions and active systems."
+    },
+    {
+      "file": "src/alien/worlds.rs",
+      "pattern": "^pub struct WorldSpec",
+      "description": "A saved alien recipe contains physical initial conditions: terrain, weather, eddy geometry, solids, population anatomy and behaviour, and listening space. Bounds constrain the search, not the identity of a named landscape. This model shares Earth physics; it does not invent new chemistry or simulate literal atoms."
+    },
+    {
+      "file": "src/alien/worlds.rs",
+      "pattern": "^    pub fn mutate\\(",
+      "description": "Mutation explores environment, material, geometry, organ topology and population changes. Fresh seeds supply global exploration. Keeping a parent preserves its geography seed so nearby search can explore related worlds."
+    },
+    {
+      "file": "src/alien/worlds.rs",
+      "pattern": "^    fn species\\(",
+      "description": "Generated mass-and-spring organs are solved for their resonances. Those derived ratios feed the shared population voice renderer without calling any named Earth species or selecting musical notes."
+    },
+    {
+      "file": "src/alien/worlds.rs",
+      "pattern": "^    pub fn build\\(",
+      "description": "The recipe builds the same World as Earth presets. A geological preparation period carves terrain, then ongoing sediment/water history is enabled. Physical contacts, coupled bubbles and local hearing all use the existing implementations."
+    },
+    {
+      "file": "src/world/assembly.rs",
+      "pattern": "^impl World",
+      "description": "General physical assembly interfaces accept eddy scales, material bodies and spatial populations. These connect the generator to shared runtime mechanisms without passing through Earth presets. Physics reports expose actual contacts, bubble packets, heard calls, retained water and transported sediment."
+    },
+    {
+      "file": "src/alien/analysis.rs",
+      "pattern": "^pub fn measure\\(",
+      "description": "Candidate evaluation renders three startup seconds plus twelve measured seconds at 16 kHz. FFT spectra and stereo/time-domain statistics measure the audio result, not the recipe labels. The short window is an approximation to the character of a slowly evolving world."
+    },
+    {
+      "file": "src/alien/analysis.rs",
+      "pattern": "^    pub fn cell\\(",
+      "description": "Brightness, spectral texture, temporal motion and stereo width locate sound in 108 possible regions. Labels describe results after rendering. A new region does not need to beat a global favourite to survive."
+    },
+    {
+      "file": "src/alien/analysis.rs",
+      "pattern": "^    pub fn score\\(",
+      "description": "Within each region, a roughness/high-frequency/peakiness/onset proxy selects a champion. It is an aesthetic prior, not a validated guarantee of peacefulness. Stored gain and shared output saturation separately bound playback peaks."
+    },
+    {
+      "file": "src/alien/atlas.rs",
+      "pattern": "^    pub fn scout\\(",
+      "description": "Global exploration mixes new seeds with mutations of archive champions. Local exploration evaluates neighbours of a chosen world. Accepted recipes are saved incrementally; cancellation keeps completed results. Search runs outside the audio callback."
+    },
+    {
+      "file": "src/alien/atlas.rs",
+      "pattern": "^    pub fn save\\(",
+      "description": "World files preserve the complete versioned recipe, gain, descriptors, physics diagnostics and parent identity. Atomic publication never overwrites an existing world. Old champions remain browsable, with favourites stored independently of selection."
+    },
+    {
+      "file": "src/tui/library.rs",
+      "pattern": "^pub fn run\\(",
+      "description": "The library browses Atlas, Favourites and All saved. One worker scouts; another serially prepares playback with latest-request handling. Current audio continues while worlds are prepared. Pause freezes listening; search cancellation is separate."
+    },
+    {
+      "file": "src/alien.rs",
+      "pattern": "^pub struct Discovery",
+      "description": "The original ripple-alien-v1 format stores A/B lineage choices for the smaller resonator experiment. It retains its original synthesis and search semantics; full shared-world recipes use the separate ripple-world-v2 format."
     },
     {
       "file": "src/world.rs",
@@ -50,7 +130,7 @@
     {
       "file": "src/world.rs",
       "pattern": "^    pub fn new\\(",
-      "description": "`World::new` wires the default state. Notice that most optional sound sources are `None`; presets turn them on explicitly through the assembly methods below."
+      "description": "World::new creates the shared physical runtime. Both preset builders and the alien recipe builder supply initial conditions and activate components through assembly methods. A source does not know whether a person named its configuration or a search discovered it."
     },
     {
       "file": "src/world.rs",
@@ -150,12 +230,12 @@
     {
       "file": "src/critters.rs",
       "pattern": "^pub struct Species",
-      "description": "Species contains the authored biology of a voice: pitch range, syllable shape, phrase timing, amplitude and reverb send. The hearing scene supplies position rather than drawing a fresh stereo pan for every call."
+      "description": "Species holds the population voice renderer parameters. Earth constructors contain authored species identities; alien populations supply spectra derived from generated mechanical organs and discovered timing parameters. Both still use an oscillator/envelope approximation rather than resolved vocal anatomy."
     },
     {
       "file": "src/critters.rs",
       "pattern": "^pub struct Chorus",
-      "description": "A chorus owns individual voices, fixed positions, propagation paths and an arrival queue. Voices retain authored species rules, but their clocks can influence one another through audible calls. The listener receives delayed, attenuated waveforms from the same geometry; clock synchrony is measured rather than guaranteed."
+      "description": "A chorus owns individual voices, fixed positions, propagation paths and an arrival queue. Voices follow their species parameters, authored for Earth populations and generated for alien populations; their clocks can influence one another through audible calls. The listener receives delayed, attenuated waveforms from the same geometry; clock synchrony is measured rather than guaranteed."
     },
     {
       "file": "src/critters.rs",
@@ -200,7 +280,12 @@
     {
       "file": "src/world.rs",
       "pattern": "^    fn flowing_presets_drive_suspensions_clouds_and_active_history\\(",
-      "description": "Finish with the 30-second integration audit: flowing presets must stay finite, mobilize sediment, activate churn clouds where expected, and keep wind-driven chimes inside the small-angle range. This slower test is ignored by default; run all checks with `cargo test --release -- --include-ignored`. It verifies subsystem connections alongside the focused conservation, causality and replay tests."
+      "description": "The 30-second preset integration audit checks that flowing presets stay finite, mobilize sediment, activate churn clouds where expected, and keep wind-driven chimes inside the small-angle range. This slower test is ignored by default; run all checks with `cargo test --release -- --include-ignored`. It verifies subsystem connections alongside the focused conservation, causality and replay tests."
+    },
+    {
+      "file": "src/alien/atlas.rs",
+      "pattern": "^    fn generated_worlds_cover_regions_and_exercise_all_four_shared_mechanisms",
+      "description": "The full integration audit checks coverage of different rendered sound regions, actual operation of the four shared mechanisms, saved-library reopening, and longer playback bounds. Unit tests separately cover exact recipe/audio replay, favourite survival and invalid files."
     }
   ]
 }

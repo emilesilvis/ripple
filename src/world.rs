@@ -11,11 +11,15 @@ use crate::bubbles::BubbleCloud;
 use crate::contacts::ChimeRig;
 use crate::critters::{Chorus, Species};
 use crate::dsp::{pan, Noise, Space};
+use crate::events::{EventLog, Kind as Observation};
 use crate::field::{Event, Field, Surface};
 use crate::matter::{bar_length_for_pitch, Body, Matter};
 use crate::sky::{Climate, Sky};
 use crate::voices::{Eddies, Turbulence};
 use std::f32::consts::TAU;
+
+mod assembly;
+pub use assembly::{PhysicsReport, ResonantBody};
 
 /// Minnaert's law: an air bubble of radius r in water rings at ~3.26/r Hz·m.
 /// Every plink and burble in the world gets its pitch from this one line.
@@ -128,6 +132,7 @@ pub struct World {
     // Transient pools.
     bubbles: Vec<Bubble>,
     clouds: Vec<BubbleCloud>,
+    cloud_events: u64,
 
     control_seconds: f64,
 
@@ -145,6 +150,7 @@ pub struct World {
     // Gentle startup fade.
     fade: f32,
     fade_step: f32,
+    events: EventLog,
 }
 
 impl World {
@@ -180,6 +186,7 @@ impl World {
             fire_gain: 0.0,
             bubbles: vec![Bubble::inactive(sr); 24],
             clouds: vec![BubbleCloud::new(sr); 24],
+            cloud_events: 0,
             control_seconds: 0.0,
             choruses: Vec::new(),
             rain_gain: 0.0,
@@ -188,7 +195,19 @@ impl World {
             reverb_mix: 0.5,
             fade: 0.0,
             fade_step: 1.0 / (3.0 * sr),
+            events: EventLog::new(sr),
         }
+    }
+
+    pub fn observe(&mut self) {
+        if !self.events.enabled() {
+            self.events.enable();
+            self.events.emit(Observation::Started { seed: self.seed });
+        }
+    }
+
+    pub fn drain_events(&mut self, batch: &mut crate::events::Batch) {
+        self.events.drain(batch);
     }
 
     // --- assembly (called by presets) --------------------------------------
@@ -364,7 +383,18 @@ impl World {
                 let nx = self.rng.unit();
                 let ny = self.rng.unit();
                 let energy = self.rng.range(0.05, 0.32);
-                match self.field.surface_at(nx, ny) {
+                let surface = self.field.surface_at(nx, ny);
+                self.events.emit(Observation::RainImpact {
+                    x: nx,
+                    y: ny,
+                    strength: energy,
+                    surface: match surface {
+                        Surface::Roof => "roof",
+                        Surface::Open => "open ground",
+                        Surface::Rock => "rock",
+                    },
+                });
+                match surface {
                     Surface::Roof => {
                         if let Some(roof) = &mut self.roof {
                             roof.strike(energy, nx);
@@ -377,9 +407,18 @@ impl World {
                         // its Minnaert ring is the plink of rain on a pond.
                         let radius_m = self.rng.range(0.8e-3, 2.5e-3);
                         let amp = energy * 0.4 * self.rain_gain;
+                        let mut voiced = false;
                         if let Some(b) = self.bubbles.iter_mut().find(|b| !b.active) {
                             b.spawn(minnaert_hz(radius_m), amp, nx, &mut self.rng);
+                            voiced = true;
                         }
+                        self.events.emit(Observation::Bubble {
+                            cause: "rain",
+                            radius_m,
+                            strength: amp,
+                            pan: nx,
+                            voiced,
+                        });
                     }
                 }
             }
@@ -405,11 +444,25 @@ impl World {
                     radius_m,
                     energy,
                 } => {
+                    let mut voiced = false;
                     if let Some(cloud) = self.clouds.iter_mut().find(|cloud| !cloud.is_active()) {
                         cloud.spawn(radius_m, energy, pan);
+                        self.cloud_events += 1;
+                        voiced = true;
                     }
+                    self.events.emit(Observation::Bubble {
+                        cause: "churn",
+                        radius_m,
+                        strength: energy,
+                        pan,
+                        voiced,
+                    });
                 }
                 Event::Break { pan, energy } => {
+                    self.events.emit(Observation::WaveBreak {
+                        pan,
+                        strength: energy,
+                    });
                     if let Some(surf) = &mut self.surf {
                         surf.drive(energy + 0.2, 0.9);
                     }
@@ -419,6 +472,14 @@ impl World {
                     if let Some(cloud) = self.clouds.iter_mut().find(|cloud| !cloud.is_active()) {
                         let radius_m = 0.003 + 0.006 * (energy / 0.6).clamp(0.0, 1.0);
                         cloud.spawn(radius_m, energy * 0.15, pan);
+                        self.cloud_events += 1;
+                        self.events.emit(Observation::Bubble {
+                            cause: "breaking wave",
+                            radius_m,
+                            strength: energy * 0.15,
+                            pan,
+                            voiced: true,
+                        });
                     }
                 }
             }
@@ -457,6 +518,7 @@ impl World {
             let speed = air * 7.0;
             let chimes = &mut self.chimes;
             let strikes = &mut self.chime_strikes;
+            let events = &mut self.events;
             rig.step(
                 dt,
                 [
@@ -468,6 +530,11 @@ impl World {
                         .body
                         .strike(impact.velocity_kick, impact.position);
                     *strikes += 1;
+                    events.emit(Observation::Contact {
+                        body: impact.bar,
+                        position: impact.position,
+                        velocity_kick: impact.velocity_kick,
+                    });
                 },
             );
         }
@@ -500,7 +567,12 @@ impl World {
                     } else {
                         self.rng.range(0.08, 0.4)
                     };
-                    wood.strike(energy, self.rng.range(0.3, 0.7));
+                    let position = self.rng.range(0.3, 0.7);
+                    wood.strike(energy, position);
+                    self.events.emit(Observation::FirePop {
+                        position,
+                        strength: energy,
+                    });
                 }
             }
         }
@@ -579,6 +651,24 @@ impl World {
         if self.block_pos == 0 {
             self.step_controls();
             self.block_pos = BLOCK;
+            if self.events.summary_due() {
+                self.events.emit(Observation::Weather {
+                    air: self.sky.air_speed(),
+                    gust: self.sky.gust(),
+                    rain: self.sky.rain(),
+                    daylight: self.sky.daylight(),
+                });
+                let history = self.field.history_stats();
+                let (flow, speed) = self.field.flow();
+                self.events.emit(Observation::Water {
+                    flow,
+                    speed,
+                    surface_m3: history.surface_water_m3,
+                    retained_m3: history.retained_water_m3,
+                    suspended_m3: history.suspended_solid_m3,
+                    exported_m3: history.exported_solid_m3,
+                });
+            }
         }
         self.block_pos -= 1;
 
@@ -666,12 +756,17 @@ impl World {
         // Living voices, weighted by time of day.
         let night = self.sky.night();
         let day = 1.0 - night;
-        for v in &mut self.choruses {
+        for (population, v) in self.choruses.iter_mut().enumerate() {
             let wake = v.nocturnal * night + (1.0 - v.nocturnal) * day;
             if wake < 1e-3 {
                 continue;
             }
-            let (x, y) = v.chorus.process();
+            let (x, y) = if self.events.enabled() {
+                v.chorus
+                    .process_observed(population, |event| self.events.emit(event))
+            } else {
+                v.chorus.process()
+            };
             let g = v.gain * wake;
             l += x * g;
             r += y * g;
@@ -693,6 +788,7 @@ impl World {
         }
 
         // Cushioned master soft-clip.
+        self.events.advance();
         ((l * 0.8).tanh() * 0.9, (r * 0.8).tanh() * 0.9)
     }
 }

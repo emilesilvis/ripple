@@ -9,6 +9,8 @@ cpal = "0.15"
 rand = { version = "0.8", features = ["small_rng"] }
 hound = "3.5"
 crossterm = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [profile.release]
 opt-level = 3

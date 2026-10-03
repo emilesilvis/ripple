@@ -489,6 +489,15 @@ impl Chorus {
     }
 
     pub fn process(&mut self) -> (f32, f32) {
+        self.process_observed(0, |_| {})
+    }
+
+    pub(crate) fn process_observed(
+        &mut self,
+        population: usize,
+        mut emit: impl FnMut(crate::events::Kind),
+    ) -> (f32, f32) {
+        use crate::events::Kind;
         // Receive before advancing voices. The queue includes every source,
         // so simultaneous onsets are not silently reduced to one caller.
         while self.arrivals.peek().is_some_and(|a| a.at <= self.sample) {
@@ -500,18 +509,40 @@ impl Chorus {
                 .max(2.0 * self.scene.masking_level);
             if arrival.level > threshold {
                 self.stats.heard_calls += 1;
+                let before = self.critters[arrival.receiver].phase();
                 self.critters[arrival.receiver].kick(self.coupling * arrival.gain);
+                emit(Kind::CallHeard {
+                    population,
+                    caller: arrival.source,
+                    receiver: arrival.receiver,
+                    level: arrival.level,
+                    clock_shift: self.critters[arrival.receiver].phase() - before,
+                });
             } else {
                 self.stats.masked_calls += 1;
+                emit(Kind::CallMasked {
+                    population,
+                    caller: arrival.source,
+                    receiver: arrival.receiver,
+                    level: arrival.level,
+                    threshold,
+                });
             }
         }
 
         let (mut left, mut right) = (0.0, 0.0);
         let count = self.critters.len();
         for source in 0..count {
+            let was_active = self.critters[source].active;
             let out = self.critters[source].process_mono();
             if let Some(level) = self.critters[source].emitted_level {
                 self.stats.emitted_calls += 1;
+                emit(Kind::CallStarted {
+                    population,
+                    caller: source,
+                    frequency_hz: self.critters[source].freq,
+                    level,
+                });
                 for receiver in 0..count {
                     if receiver != source {
                         let path = self.paths[source * count + receiver];
@@ -524,6 +555,12 @@ impl Chorus {
                         });
                     }
                 }
+            }
+            if was_active && !self.critters[source].active {
+                emit(Kind::CallEnded {
+                    population,
+                    caller: source,
+                });
             }
             let path = self.listener_paths[source];
             let received = self.listener_delays[source].process(out) * path.gain;
@@ -569,8 +606,9 @@ mod hearing_tests {
     fn an_actual_emission_must_precede_delayed_hearing() {
         let mut chorus = pair(1_000.0, 1.0, 0.001);
         let mut emission_at = None;
+        let mut events = Vec::new();
         for sample in 0..150 {
-            chorus.process();
+            chorus.process_observed(7, |event| events.push((sample, event)));
             if chorus.hearing_stats().emitted_calls > 0 && emission_at.is_none() {
                 emission_at = Some(sample);
             }
@@ -581,6 +619,23 @@ mod hearing_tests {
                 assert_eq!(sample, emission_at.unwrap() + 100);
                 assert_eq!(chorus.hearing_stats().heard_calls, 1);
                 assert!(chorus.critters[1].phase() > 0.2);
+                let started = events
+                    .iter()
+                    .find(|(_, event)| {
+                        matches!(
+                            event,
+                            crate::events::Kind::CallStarted {
+                                population: 7,
+                                caller: 0,
+                                ..
+                            }
+                        )
+                    })
+                    .unwrap();
+                let heard = events.iter().find(|(_, event)| matches!(event,
+                    crate::events::Kind::CallHeard { population: 7, caller: 0, receiver: 1, clock_shift, .. } if *clock_shift > 0.0)).unwrap();
+                assert_eq!(started.0, emission_at.unwrap());
+                assert_eq!(heard.0, started.0 + 100);
                 return;
             }
         }
@@ -665,9 +720,10 @@ mod hearing_tests {
         .unwrap();
         let open_capacity = open.arrivals.capacity();
         let barrier_capacity = barrier.arrivals.capacity();
+        let mut events = Vec::new();
         for _ in 0..48_000 * 3 {
             let a = open.process();
-            let b = barrier.process();
+            let b = barrier.process_observed(0, |event| events.push(event));
             assert_eq!(b, repeat.process());
             for sample in [a.0, a.1, b.0, b.1] {
                 assert!(sample.is_finite() && sample.abs() < 1.0);
@@ -678,6 +734,28 @@ mod hearing_tests {
         assert!(barrier.hearing_stats().heard_calls > 0);
         assert!(barrier.hearing_stats().masked_calls > 0);
         assert_eq!(barrier.hearing_stats(), repeat.hearing_stats());
+        let stats = barrier.hearing_stats();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, crate::events::Kind::CallStarted { .. }))
+                .count() as u64,
+            stats.emitted_calls
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, crate::events::Kind::CallHeard { .. }))
+                .count() as u64,
+            stats.heard_calls
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, crate::events::Kind::CallMasked { .. }))
+                .count() as u64,
+            stats.masked_calls
+        );
         assert_eq!(open.arrivals.capacity(), open_capacity);
         assert_eq!(barrier.arrivals.capacity(), barrier_capacity);
     }
