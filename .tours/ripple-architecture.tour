@@ -10,12 +10,17 @@
     {
       "file": "README.md",
       "pattern": "^## Architecture",
-      "description": "The architecture table is the quickest module map. The runtime path is: CLI -> preset -> World -> physics/control update -> per-sample audio readout."
+      "description": "The architecture table is the quickest module map. The runtime path is: CLI and terminal player -> preset -> World -> physics/control update -> per-sample audio readout."
     },
     {
       "file": "src/main.rs",
       "pattern": "^fn main\\(",
-      "description": "The CLI dispatches here. `list`, `probe`, `sync`, `render`, and default live playback all end up building a named preset world at a chosen sample rate."
+      "description": "The CLI entrypoint parses the selected world and seed, opens the terminal player, or routes an offline diagnostic through the same preset builder."
+    },
+    {
+      "file": "src/tui.rs",
+      "pattern": "^pub fn run\\(",
+      "description": "The terminal player handles world selection, pause, volume and seeded restarts. World construction stays outside the CPAL callback; the callback owns playback, and the UI thread disposes of retired worlds after a scene change."
     },
     {
       "file": "src/presets.rs",
@@ -45,7 +50,7 @@
     {
       "file": "src/world.rs",
       "pattern": "^    fn step_controls\\(",
-      "description": "`step_controls` is the slower physics tick. Every 32 audio samples it advances weather and water, creates rain impacts and bubbles, drives turbulence, strikes chimes, and triggers fire pops."
+      "description": "Every 32 audio samples, the control tick advances weather and water history, routes rain impacts, creates coupled bubble packets, drives turbulent voices, moves the chime rig into contact, and updates environmental masking for the creatures."
     },
     {
       "file": "src/world.rs",
@@ -55,12 +60,12 @@
     {
       "file": "src/field.rs",
       "pattern": "^pub struct Field",
-      "description": "`Field` is the shallow-water grid: terrain height, water depth, x/y flux, roughness, surfaces, springs/drains, ocean swell, and generated water events."
+      "description": "Field owns a small virtual-pipes water grid: terrain, surface water, directional flux, springs/drains and swell. Its history state also holds retained rain, mobile sediment and the evolving bed."
     },
     {
       "file": "src/field.rs",
       "pattern": "^    pub fn step\\(",
-      "description": "`Field::step` is the water law. It updates flux from surface-height gradients, limits outflow so cells cannot go negative, moves water, and then detects audible events."
+      "description": "The water step releases retained rain, updates flux from surface-height gradients, limits outflow, and moves water and suspended sediment. Erosion/deposition changes the bed, while flow produces the next audible water events."
     },
     {
       "file": "src/field.rs",
@@ -71,6 +76,11 @@
       "file": "src/field.rs",
       "pattern": "^    pub fn geology\\(",
       "description": "`geology` runs before the audible world starts. The same water simulation erodes raw terrain by stream power, marks rough/scoured rock, drains the epoch, and leaves geography for the listener to hear."
+    },
+    {
+      "file": "src/field.rs",
+      "pattern": "^    pub fn enable_history\\(",
+      "description": "After geological preparation, presets enable ongoing history. Rain can be held in a soil reservoir; moving water transports sediment and changes the bed throughout playback, leaving consequences after the weather changes."
     },
     {
       "file": "src/voices.rs",
@@ -103,14 +113,29 @@
       "description": "`step_sub` applies the bending operator, stiffness-proportional damping, air loss, and the mounting spring. The code substeps stiff bodies to keep high-frequency modes stable."
     },
     {
+      "file": "src/contacts.rs",
+      "pattern": "^pub struct ChimeRig",
+      "description": "The chime rig supplies encounters as well as voices. Wind drives suspended bodies and a clapper; impulse collisions transfer energy into the existing bar lattices. Its mechanical ledger tracks forcing, damping and collision loss."
+    },
+    {
+      "file": "src/bubbles.rs",
+      "pattern": "^pub struct BubbleCloud",
+      "description": "Water churn excites bounded packets of eight interacting bubbles. The input radius describes their total gas volume, and a precomputed coupled modal system supplies collective resonances without allocating during playback."
+    },
+    {
       "file": "src/critters.rs",
       "pattern": "^pub struct Species",
-      "description": "`Species` is where living voices are intentionally authored: base pitch, song shape, timing, stereo spread, and reverb behavior. Unlike matter and fluids, individual animal calls are genes."
+      "description": "Species contains the authored biology of a voice: pitch range, syllable shape, phrase timing, amplitude and reverb send. The hearing scene supplies position rather than drawing a fresh stereo pan for every call."
     },
     {
       "file": "src/critters.rs",
       "pattern": "^pub struct Chorus",
-      "description": "`Chorus` is the emergent part of critters. Multiple agents process together, and positive or negative coupling lets rhythms synchronize or alternate."
+      "description": "A chorus steps voices at fixed positions. Actual emitted syllables enter a causal arrival queue; neighbours can nudge their clocks only after travel time and an audibility test against distance loss and background masking. Synchrony is measured rather than guaranteed."
+    },
+    {
+      "file": "src/acoustics.rs",
+      "pattern": "^    pub fn path\\(",
+      "description": "One geometric path calculation serves both animal hearing and the listener: finite sound speed gives delay, distance gives attenuation, and an optional barrier changes transmission. The model deliberately leaves diffraction and frequency-dependent hearing unresolved."
     },
     {
       "file": "src/sky.rs",
@@ -120,17 +145,12 @@
     {
       "file": "src/dsp.rs",
       "pattern": "^pub struct Space",
-      "description": "`Space` is the propagation stand-in: a compact Schroeder-style reverb. The world sends selected sources into left and right spaces so terrain answers back around the listener."
+      "description": "Space models the diffuse reflected tail with a compact Schroeder-style reverb. Direct creature hearing and listening paths live in acoustics.rs; the world adds this inexpensive surrounding-space response to selected sources."
     },
     {
       "file": "src/audio.rs",
       "pattern": "^pub fn render_wav\\(",
       "description": "`render_wav` is the offline sink. It repeatedly asks the world for stereo samples, writes 16-bit WAV frames, and reports peak/RMS for sanity."
-    },
-    {
-      "file": "src/audio.rs",
-      "pattern": "^pub fn run_live\\(",
-      "description": "`run_live` is the live sink. CPAL chooses the output device format, then the callback pulls `world.next_sample()` for each output frame."
     },
     {
       "file": "src/matter.rs",

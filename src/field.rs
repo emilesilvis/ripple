@@ -12,7 +12,7 @@
 use crate::dsp::Noise;
 
 /// What a falling drop meets where it lands.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Surface {
     /// Open ground or water: rain soaks in and raises the water here.
     Open,
@@ -26,12 +26,44 @@ pub enum Surface {
 /// only physical facts — a bubble's *size*, a wave's energy; what they sound
 /// like is decided by law where the world listens (Minnaert's resonance turns
 /// a radius into a pitch).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Event {
     /// Air entrained in fast water — a bubble of some radius, in metres.
-    Bubble { pan: f32, radius_m: f32, energy: f32 },
+    Bubble {
+        pan: f32,
+        radius_m: f32,
+        energy: f32,
+    },
     /// A wave shoaling and tipping over — a wash of foam.
     Break { pan: f32, energy: f32 },
+}
+
+/// A deliberately small catchment model: rain is retained in a linear soil
+/// reservoir; a mobile bed exchanges and advects solid volume with the water.
+/// Erosion runs faster than natural geological time.
+struct History {
+    retained: Vec<f64>, // water-equivalent depth, m
+    bed: Vec<f64>,
+    bedrock: Vec<f64>,
+    sediment: Vec<f64>, // suspended solid volume / cell area, m
+    delta: Vec<f64>,
+    capacity_m: f64,
+    release_seconds: f64,
+    erosion_rate: f64,
+    exported_solid_m3: f64,
+    rain_m3: f64,
+    drained_water_m3: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct HistoryStats {
+    pub surface_water_m3: f64,
+    pub retained_water_m3: f64,
+    pub suspended_solid_m3: f64,
+    pub bed_solid_m3: f64,
+    pub exported_solid_m3: f64,
+    pub rain_m3: f64,
+    pub drained_water_m3: f64,
 }
 
 pub struct Field {
@@ -55,6 +87,7 @@ pub struct Field {
     // Per-cell memory for detecting a wave that just broke.
     prev_speed: Vec<f32>,
     events: Vec<Event>,
+    history: Option<History>,
 }
 
 impl Field {
@@ -79,6 +112,7 @@ impl Field {
             rng: Noise::new(seed ^ 0xf1e1_d000),
             prev_speed: vec![0.0; n],
             events: Vec::with_capacity(64),
+            history: None,
         }
     }
 
@@ -99,6 +133,9 @@ impl Field {
     pub fn set_terrain(&mut self, x: usize, y: usize, height: f32) {
         let i = self.idx(x, y);
         self.terrain[i] = height;
+        if let Some(history) = &mut self.history {
+            history.bed[i] = height as f64;
+        }
     }
     pub fn terrain_at(&self, x: usize, y: usize) -> f32 {
         self.terrain[self.idx(x, y)]
@@ -132,18 +169,190 @@ impl Field {
         self.surface[self.idx(x, y)]
     }
 
-    /// Deposit water at a normalised position — a raindrop soaking in.
-    pub fn add_water(&mut self, nx: f32, ny: f32, amount: f32) {
+    /// Enable history after the initial geological epoch. Bedrock limits
+    /// erosion; retained rain later returns as seepage with a 40-second time
+    /// constant. Roofs are impermeable and keep their surface classification.
+    pub fn enable_history(&mut self) {
+        if self.history.is_some() {
+            return;
+        }
+        let n = self.w * self.h;
+        let bed: Vec<f64> = self.terrain.iter().map(|&h| h as f64).collect();
+        let bedrock = bed
+            .iter()
+            .zip(&self.surface)
+            .map(|(&h, surface)| h - if *surface == Surface::Rock { 0.0 } else { 0.06 })
+            .collect();
+        self.history = Some(History {
+            retained: vec![0.0; n],
+            bed,
+            bedrock,
+            sediment: vec![0.0; n],
+            delta: vec![0.0; n],
+            capacity_m: 0.08,
+            release_seconds: 40.0,
+            erosion_rate: 0.006,
+            exported_solid_m3: 0.0,
+            rain_m3: 0.0,
+            drained_water_m3: 0.0,
+        });
+    }
+
+    /// Rain is a water volume input, split between retention and runoff.
+    /// Existing flowing water is not repeatedly reclassified as new rainfall.
+    pub fn rain_on(&mut self, nx: f32, ny: f32, depth_m: f32) {
         let x = ((nx * self.w as f32) as usize).min(self.w - 1);
         let y = ((ny * self.h as f32) as usize).min(self.h - 1);
         let i = self.idx(x, y);
-        self.depth[i] += amount;
+        let rain = depth_m.max(0.0) as f64;
+        let retained = if let Some(history) = &mut self.history {
+            history.rain_m3 += rain * (self.cell as f64).powi(2);
+            let uptake = if self.surface[i] == Surface::Open {
+                (rain * 0.8).min((history.capacity_m - history.retained[i]).max(0.0))
+            } else {
+                0.0
+            };
+            history.retained[i] += uptake;
+            uptake
+        } else {
+            0.0
+        };
+        self.depth[i] += (rain - retained) as f32;
+    }
+
+    #[cfg(test)]
+    fn rainfall(&mut self, rate_m_s: f32, dt: f32) {
+        for y in 0..self.h {
+            for x in 0..self.w {
+                self.rain_on(
+                    (x as f32 + 0.5) / self.w as f32,
+                    (y as f32 + 0.5) / self.h as f32,
+                    rate_m_s * dt,
+                );
+            }
+        }
+    }
+
+    pub fn history_stats(&self) -> HistoryStats {
+        let area = (self.cell as f64).powi(2);
+        let mut stats = HistoryStats {
+            surface_water_m3: self.depth.iter().map(|&d| d as f64).sum::<f64>() * area,
+            retained_water_m3: 0.0,
+            suspended_solid_m3: 0.0,
+            bed_solid_m3: 0.0,
+            exported_solid_m3: 0.0,
+            rain_m3: 0.0,
+            drained_water_m3: 0.0,
+        };
+        if let Some(history) = &self.history {
+            stats.retained_water_m3 = history.retained.iter().sum::<f64>() * area;
+            stats.suspended_solid_m3 = history.sediment.iter().sum::<f64>() * area;
+            stats.bed_solid_m3 = history
+                .bed
+                .iter()
+                .zip(&history.bedrock)
+                .map(|(bed, rock)| bed - rock)
+                .sum::<f64>()
+                * area;
+            stats.exported_solid_m3 = history.exported_solid_m3;
+            stats.rain_m3 = history.rain_m3;
+            stats.drained_water_m3 = history.drained_water_m3;
+        }
+        stats
+    }
+
+    fn release_retained_water(&mut self, dt: f32) {
+        if let Some(history) = &mut self.history {
+            let fraction = -(-(dt as f64) / history.release_seconds).exp_m1();
+            for (depth, retained) in self.depth.iter_mut().zip(&mut history.retained) {
+                let released = *retained * fraction;
+                *retained -= released;
+                *depth += released as f32;
+            }
+        }
+    }
+
+    /// Upwind transport uses the already-limited water fluxes. Every solid
+    /// transfer is subtracted from one cell and added to its neighbour.
+    fn transport_sediment(&mut self, dt: f32) {
+        let Some(history) = &mut self.history else {
+            return;
+        };
+        history.delta.fill(0.0);
+        let area = (self.cell as f64).powi(2);
+        let mut transfer = |a: usize, b: usize, flux: f32| {
+            let (from, to) = if flux >= 0.0 { (a, b) } else { (b, a) };
+            let water = self.depth[from] as f64 * area;
+            if water > 1e-15 {
+                let fraction = ((flux.abs() as f64 * dt as f64) / water).min(1.0);
+                let solid = history.sediment[from] * fraction;
+                history.delta[from] -= solid;
+                history.delta[to] += solid;
+            }
+        };
+        for y in 0..self.h {
+            for x in 0..self.w {
+                let i = y * self.w + x;
+                if x + 1 < self.w {
+                    transfer(i, i + 1, self.fx[i]);
+                }
+                if y + 1 < self.h {
+                    transfer(i, i + self.w, self.fy[i]);
+                }
+            }
+        }
+        for (solid, delta) in history.sediment.iter_mut().zip(&history.delta) {
+            *solid = (*solid + delta).max(0.0);
+        }
+    }
+
+    fn exchange_with_bed(&mut self, dt: f32) {
+        if self.history.is_none() {
+            return;
+        }
+        for y in 0..self.h {
+            for x in 0..self.w {
+                let i = self.idx(x, y);
+                if self.surface[i] == Surface::Roof {
+                    continue;
+                }
+                let speed = self.cell_speed(x, y, i) as f64;
+                let history = self.history.as_mut().unwrap();
+                let capacity = self.depth[i] as f64 * (speed / 0.12).min(1.0) * 0.04;
+                let difference = capacity - history.sediment[i];
+                if difference > 0.0 {
+                    let erosion = (history.erosion_rate * speed * dt as f64)
+                        .min(difference)
+                        .min((history.bed[i] - history.bedrock[i]).max(0.0));
+                    history.bed[i] -= erosion;
+                    history.sediment[i] += erosion;
+                } else {
+                    let fraction = if self.depth[i] < 1e-5 {
+                        1.0
+                    } else {
+                        -(-(dt as f64) * 1.5).exp_m1()
+                    };
+                    let deposit = -difference * fraction;
+                    history.bed[i] += deposit;
+                    history.sediment[i] -= deposit;
+                }
+                self.terrain[i] = history.bed[i] as f32;
+                let cover = (history.bed[i] - history.bedrock[i]).max(0.0);
+                self.rough[i] = (0.12 + 0.88 * (1.0 - cover / 0.06).clamp(0.0, 1.0)) as f32;
+                self.surface[i] = if cover < 0.004 {
+                    Surface::Rock
+                } else {
+                    Surface::Open
+                };
+            }
+        }
     }
 
     // --- the one law -------------------------------------------------------
 
     pub fn step(&mut self, dt: f32) {
         self.time += dt;
+        self.release_retained_water(dt);
         let g = 9.8;
         let l = self.cell;
         let area = l * l;
@@ -225,6 +434,8 @@ impl Field {
             }
         }
 
+        self.transport_sediment(dt);
+
         // 3. Move the water; measure how fast each cell runs.
         for y in 0..self.h {
             for x in 0..self.w {
@@ -239,11 +450,20 @@ impl Field {
                     self.depth[c] = 0.0;
                 }
                 if self.drain[c] > 0.0 {
-                    self.depth[c] *= 1.0 - (self.drain[c] * dt).min(1.0);
+                    let fraction = (self.drain[c] * dt).min(1.0);
+                    if let Some(history) = &mut self.history {
+                        history.drained_water_m3 +=
+                            self.depth[c] as f64 * area as f64 * fraction as f64;
+                        let solid = history.sediment[c] * fraction as f64;
+                        history.sediment[c] -= solid;
+                        history.exported_solid_m3 += solid * area as f64;
+                    }
+                    self.depth[c] *= 1.0 - fraction;
                 }
             }
         }
 
+        self.exchange_with_bed(dt);
         self.detect_events(dt);
     }
 
@@ -284,7 +504,11 @@ impl Field {
                     if self.rng.chance((rate * dt).min(0.9)) {
                         let radius_m = self.rng.range(0.0036, 0.009) / (1.0 + churn);
                         let energy = (churn * 0.5).min(0.1);
-                        self.events.push(Event::Bubble { pan, radius_m, energy });
+                        self.events.push(Event::Bubble {
+                            pan,
+                            radius_m,
+                            energy,
+                        });
                     }
                 }
 
@@ -350,8 +574,8 @@ impl Field {
     pub fn geology(&mut self, steps: usize, rainfall: f32) {
         let dt = 0.01; // compressed geological time per step
         let k_erode = 0.4; // stream-power constant
-        // The soft cover is only so deep; below it, bedrock resists. This is
-        // what keeps a valley a valley instead of a bottomless trench.
+                           // The soft cover is only so deep; below it, bedrock resists. This is
+                           // what keeps a valley a valley instead of a bottomless trench.
         let soil = 0.35;
         let n = self.w * self.h;
         let mut wear = vec![0.0f32; n];
@@ -400,5 +624,112 @@ impl Field {
         self.prev_speed.iter_mut().for_each(|s| *s = 0.0);
         self.events.clear();
         self.time = 0.0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DT: f32 = 32.0 / 48_000.0;
+
+    fn landscape(seed: u32) -> Field {
+        let mut field = Field::new(12, 24, 0.2, seed);
+        let mut rng = Noise::new(seed);
+        let phase = rng.range(0.0, std::f32::consts::TAU);
+        for y in 0..field.height() {
+            for x in 0..field.width() {
+                let height = (field.height() - 1 - y) as f32 * 0.022
+                    + 0.013 * (x as f32 * 1.7 + phase).sin() * (y as f32 * 0.9 + phase).cos();
+                field.set_terrain(x, y, height);
+                if y + 1 == field.height() {
+                    field.set_drain(x, y, 3.0);
+                }
+            }
+        }
+        field.enable_history();
+        field
+    }
+
+    fn bed_difference(a: &Field, b: &Field) -> f64 {
+        let mut difference = 0.0;
+        for y in 0..a.height() {
+            for x in 0..a.width() {
+                difference += (a.terrain_at(x, y) - b.terrain_at(x, y)).abs() as f64;
+            }
+        }
+        difference / (a.width() * a.height()) as f64
+    }
+
+    fn water_error(stats: HistoryStats) -> f64 {
+        stats.surface_water_m3 + stats.retained_water_m3 + stats.drained_water_m3 - stats.rain_m3
+    }
+
+    #[test]
+    fn rain_is_retained_and_released_after_the_sky_clears() {
+        let mut field = Field::new(2, 2, 1.0, 7);
+        field.enable_history();
+        field.rainfall(0.01, 1.0);
+        let before = field.history_stats();
+        for _ in 0..1500 {
+            field.step(DT);
+        }
+        let after = field.history_stats();
+        assert!(after.retained_water_m3 < before.retained_water_m3);
+        assert!(after.surface_water_m3 > before.surface_water_m3);
+        assert!((after.surface_water_m3 + after.retained_water_m3 - 0.04).abs() < 2e-6);
+    }
+
+    #[test]
+    fn transported_solid_and_water_are_accounted_for() {
+        let mut field = landscape(91);
+        let initial = field.history_stats().bed_solid_m3;
+        let mut eroded = false;
+        for step in 0..(12.0 / DT) as usize {
+            if step < (6.0 / DT) as usize {
+                field.rainfall(0.01, DT);
+            }
+            field.step(DT);
+            field.drain_events().for_each(drop);
+            let stats = field.history_stats();
+            eroded |= stats.suspended_solid_m3 > 1e-8;
+            let solid = stats.bed_solid_m3 + stats.suspended_solid_m3 + stats.exported_solid_m3;
+            assert!(
+                (solid - initial).abs() < 1e-7,
+                "solid budget drift {}",
+                solid - initial
+            );
+            assert!(
+                water_error(stats).abs() < 1e-4,
+                "water budget drift {}",
+                water_error(stats)
+            );
+        }
+        assert!(eroded, "test must actually mobilise sediment");
+        assert!(field.history_stats().exported_solid_m3 > 0.0);
+    }
+
+    #[test]
+    fn different_histories_remain_distinct_under_identical_present_forcing() {
+        let mut dry = landscape(13);
+        let mut wet = landscape(13);
+        for _ in 0..6000 {
+            wet.rainfall(0.01, DT);
+            dry.step(DT);
+            wet.step(DT);
+            dry.drain_events().for_each(drop);
+            wet.drain_events().for_each(drop);
+        }
+        let retained = wet.history_stats().retained_water_m3;
+        for _ in 0..6000 {
+            dry.step(DT);
+            wet.step(DT);
+            dry.drain_events().for_each(drop);
+            wet.drain_events().for_each(drop);
+        }
+        assert_eq!(dry.flow().0, 0.0);
+        assert!(wet.flow().0 > 0.0);
+        assert!(wet.history_stats().retained_water_m3 < retained);
+        assert!(bed_difference(&dry, &wet) > 1e-7);
     }
 }

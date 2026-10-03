@@ -1,47 +1,64 @@
 ---
 name: verify
-description: Verify ripple changes by driving the CLI — render worlds to WAV and analyze them, run the probe/sync physics diagnostics. Use after changing any engine code (dsp, matter, voices, field, world, presets).
+description: Verify ripple changes by driving the CLI — render worlds to WAV and analyze them, run the probe/sync physics diagnostics. Use after changing any engine code (dsp, matter, voices, contacts, bubbles, acoustics, critters, field, world, presets).
 ---
 
 # Verifying ripple
 
-ripple is a CLI that runs/renders simulated soundscapes. There is no way to
-"hear" audio in a session, so verification = **render to WAV + numeric
-analysis** plus the built-in **physics probes**.
+Verify engine changes with rendered audio, numeric analysis, and physics
+probes. For player changes, also exercise the TUI in an interactive terminal.
 
-## Build & surfaces
+## Build and surfaces
 
 ```sh
-cargo build --release                      # rebuild FIRST — cargo test does NOT refresh target/release/ripple
-./target/release/ripple list               # all worlds
-./target/release/ripple render <world> out.wav <secs>   # prints peak + RMS dBFS
-./target/release/ripple probe <world> <secs>   # physics only: flow energy/speed, water volume, rain, bubbles/s
-./target/release/ripple sync night-meadow <secs>  # Kuramoto order of the cricket chorus
+cargo test
+cargo build --release                       # build FIRST; cargo test does not refresh this binary
+./target/release/ripple list
+./target/release/ripple render <world> out.wav <seconds> --seed 12345
+./target/release/ripple probe <world> <seconds> --seed 12345
+./target/release/ripple sync night-meadow <seconds> --seed 12345
 ```
+
+All commands use the same engine: physical chime contacts, local hearing,
+coupled churn bubbles, and live water/sediment history. Mechanisms need the
+corresponding inhabitants, materials, and events to become active.
 
 ## What healthy looks like
 
-- `probe brook`: flow_e settles ~0.05–0.3, water volume plateaus, ~24 bubbles/s.
-- `probe storm`: water volume climbs steadily (rain feeds the field).
-- `probe shore`: water ~25–40 and *oscillating* with the 7.5 s swell; if it
-  climbs without bound the sea/terrain is in disequilibrium (a past bug).
-- `sync night-meadow`: order rises from ~0.2 to >0.9 within a few seconds.
-- `render` each world ~10 s: RMS ≈ 0.09–0.24, peak < 1.0, no NaN. Renders are
-  seeded randomly and climates wander — RMS varies run to run; use 20 s+ and
-  multiple runs before judging a level change.
-- 30 s render should take ~3 s wall clock (≥10x real-time headroom for live cpal playback).
+- Render all eight worlds for at least ten seconds: finite, non-silent audio,
+  peak below 1.0, and ample real-time headroom. `render` checks floating-point
+  samples before PCM conversion. RMS depends on world, seed, and duration;
+  compare repeatable runs before judging level changes.
+- `probe brook`: flow settles rather than diverging; water entrains bubbles
+  and transports sediment.
+- `probe storm`: rain feeds surface and retained water; delayed release and
+  evolving terrain affect subsequent flow.
+- `probe shore`: the forced sea responds to its swell without unbounded growth.
+  Individual breaking events depend on the evolving state, not a timer.
+- `sync night-meadow`: order stays finite in [0, 1]. Local calls can coordinate
+  animals without producing perfect global alignment. A fixed target such as
+  order >0.9 is not a correctness criterion.
+- `cargo test` covers lattice overtones, geological channels, passive contact
+  and energy accounting, hearing causality and attenuation, collective bubble
+  modes and stability, and retained-water/sediment conservation.
 
-## WAV analysis
+Use longer runs and multiple seeds if an apparent regression remains unclear.
+Water budgets in controlled tests include rainfall and drainage; a world's
+springs and imposed ocean boundary are additional external water sources.
 
-A stdlib-only analyzer (RMS/peak/NaN + Goertzel spectral peaks) exists at the
-scratchpad from earlier sessions; recreate as needed. Useful spectral check:
-the lowest chime bar is tuned to C4 (261.6 Hz) and its *emergent* second mode
-should appear near ×2.73–2.79 (≈715–730 Hz) in chime-bearing worlds
-(glade, cozy-rain).
+## Player checks
+
+Run the release player in a terminal with an audio output device. Check world
+selection, pause/resume, volume, same-seed restart, new seed, narrow-terminal
+layout, and quitting. Pause must freeze simulation time; selecting a world
+must keep the current audio responsive while terrain is prepared. Exiting
+must restore the cursor, normal terminal screen, and terminal input mode.
 
 ## Gotchas
 
-- `render` argument parsing is positional-loose: numbers → seconds, known
-  world names → world, anything else → output path.
-- Worlds with geology (glade, brook, cozy-rain, storm, shore) run a ~1 s
-  terrain pre-roll at build; each seed grows different terrain.
+- `render` keeps loose argument ordering: numbers mean seconds, known world
+  names choose a world, and anything else is the output path.
+- Worlds with geology (glade, brook, cozy-rain, storm, shore) have a terrain
+  pre-roll. Each seed grows different terrain.
+- Replay requires both the same seed and the same sample rate.
+- Field history persists during a run; restarting creates a fresh world.

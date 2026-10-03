@@ -2,11 +2,14 @@
 //!
 //! A critter is a nonlinear oscillator (a voice) plus a behavioural clock. On
 //! its own it just sings now and then. The interesting part is the *chorus*:
-//! when many critters gently kick each other's clocks, order emerges — crickets
-//! fall into rhythm, frogs take turns. That synchrony is not scripted; it is
-//! the same pulse-coupling that syncs fireflies, left to run.
+//! when audible calls reach another critter, they nudge its clock. Distance,
+//! travel time, barriers and background noise determine who can hear whom.
+//! Whether that produces synchrony is an observable result, not a guarantee.
 
+use crate::acoustics::{AcousticPath, HearingScene, SignalDelay};
 use crate::dsp::{pan, Noise};
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::f32::consts::{PI, TAU};
 
 /// A species: the fixed parameters that make a cricket a cricket. Timing is in
@@ -172,7 +175,6 @@ pub struct Critter {
     // Behavioural clock: rises 0->1, then the critter sings and it resets.
     phrase_phase: f32,
     phrase_inc: f32,
-    pan: f32,
     // Currently sounding syllable.
     active: bool,
     t: f32,
@@ -186,18 +188,19 @@ pub struct Critter {
     // Syllables scheduled later in this phrase.
     pending: [Syllable; 8],
     pending_len: usize,
+    // An onset is emitted only once this syllable produces a nonzero sample.
+    onset_pending: bool,
+    emitted_level: Option<f32>,
 }
 
 impl Critter {
     pub fn new(sp: Species, sr: f32, seed: u32) -> Self {
         let mut rng = Noise::new(seed);
         let period = rng.range(sp.phrase_gap_lo, sp.phrase_gap_hi);
-        let pan = rng.range(0.08, 0.92);
         Self {
             sr,
             phrase_phase: rng.unit(), // desync the start
             phrase_inc: 1.0 / (period * sr),
-            pan,
             active: false,
             t: 0.0,
             dur: 0.0,
@@ -209,6 +212,8 @@ impl Critter {
             pulse_inc: 0.0,
             pending: [NO_SYLLABLE; 8],
             pending_len: 0,
+            onset_pending: false,
+            emitted_level: None,
             rng,
             sp,
         }
@@ -234,7 +239,6 @@ impl Critter {
     fn start_phrase(&mut self) {
         let base = self.rng.range(self.sp.carrier_lo, self.sp.carrier_hi);
         self.amp = self.rng.range(self.sp.amp_lo, self.sp.amp_hi);
-        self.pan = self.rng.range(0.08, 0.92);
         let n = if self.sp.syllables.1 > self.sp.syllables.0 {
             self.sp.syllables.0
                 + (self.rng.unit() * (self.sp.syllables.1 - self.sp.syllables.0 + 1) as f32)
@@ -273,9 +277,11 @@ impl Critter {
         self.sweep = syl.sweep;
         self.pulse_phase = 0.0;
         self.pulse_inc = TAU * self.sp.pulse_rate / self.sr;
+        self.onset_pending = true;
     }
 
-    pub fn process(&mut self) -> (f32, f32) {
+    fn process_mono(&mut self) -> f32 {
+        self.emitted_level = None;
         // Release any scheduled syllables whose delay has elapsed.
         let mut i = 0;
         while i < self.pending_len {
@@ -300,7 +306,7 @@ impl Critter {
         }
 
         if !self.active {
-            return (0.0, 0.0);
+            return 0.0;
         }
 
         let x = self.t / self.dur;
@@ -328,91 +334,351 @@ impl Critter {
         };
 
         let out = s * env * gate * self.amp;
+        if self.onset_pending && out.abs() > 1e-9 {
+            // The onset packet carries the call's nominal peak level. This is
+            // an event-level audibility model, not an auditory nerve model.
+            self.emitted_level = Some(self.amp);
+            self.onset_pending = false;
+        }
         self.phase += TAU * freq / self.sr;
         self.t += 1.0 / self.sr;
         if self.t >= self.dur {
             self.active = false;
         }
-        pan(out, self.pan)
+        out
     }
 }
 
-/// A population of one species that couples to itself. Stepping the chorus
-/// advances every critter and lets each firing gently kick the others.
+/// Counts are receiver events: one emitted call can be heard by many animals.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct HearingStats {
+    pub emitted_calls: u64,
+    pub arrived_calls: u64,
+    pub heard_calls: u64,
+    pub masked_calls: u64,
+}
+
+#[derive(Clone, Copy)]
+struct Arrival {
+    at: u64,
+    source: usize,
+    receiver: usize,
+    level: f32,
+    gain: f32,
+}
+
+// Reverse time ordering makes BinaryHeap a queue of the earliest arrivals.
+impl Ord for Arrival {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (other.at, other.source, other.receiver).cmp(&(self.at, self.source, self.receiver))
+    }
+}
+impl PartialOrd for Arrival {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl PartialEq for Arrival {
+    fn eq(&self, other: &Self) -> bool {
+        (self.at, self.source, self.receiver) == (other.at, other.source, other.receiver)
+    }
+}
+impl Eq for Arrival {}
+
+/// A population with fixed positions. Calls affect neighbours only after an
+/// actual syllable has started and its propagation delay has elapsed. The
+/// listener receives the same source waveform over the same kind of path.
 pub struct Chorus {
     critters: Vec<Critter>,
     coupling: f32,
     reverb_send: f32,
-    // Snapshot of who is about to fire, so a kick within a block is coherent.
-    was_high: Vec<bool>,
+    scene: HearingScene,
+    paths: Vec<AcousticPath>,
+    listener_paths: Vec<AcousticPath>,
+    listener_delays: Vec<SignalDelay>,
+    arrivals: BinaryHeap<Arrival>,
+    sample: u64,
+    stats: HearingStats,
 }
 
 impl Chorus {
     pub fn new(sp: Species, count: usize, coupling: f32, sr: f32, seed: u32) -> Self {
+        Self::with_scene(sp, coupling, sr, seed, HearingScene::meadow(count))
+            .expect("default hearing scene is valid")
+    }
+
+    pub fn with_scene(
+        sp: Species,
+        coupling: f32,
+        sr: f32,
+        seed: u32,
+        scene: HearingScene,
+    ) -> Result<Self, String> {
+        scene.validate(sr)?;
+        if !coupling.is_finite() {
+            return Err("coupling must be finite".into());
+        }
+        let count = scene.positions.len();
         let reverb_send = sp.reverb_send;
         let critters = (0..count)
-            .map(|i| Critter::new(sp.clone(), sr, seed.wrapping_add(i as u32 * 2_654_435_761)))
+            .map(|i| {
+                Critter::new(
+                    sp.clone(),
+                    sr,
+                    seed.wrapping_add((i as u32).wrapping_mul(2_654_435_761)),
+                )
+            })
             .collect();
-        Self {
+        let paths = scene
+            .positions
+            .iter()
+            .flat_map(|&from| scene.positions.iter().map(move |&to| (from, to)))
+            .map(|(from, to)| scene.path(from, to, sr))
+            .collect();
+        let listener_paths: Vec<_> = scene
+            .positions
+            .iter()
+            .map(|&from| scene.path(from, scene.listener, sr))
+            .collect();
+        let listener_delays = listener_paths
+            .iter()
+            .map(|path| SignalDelay::new(path.delay_samples))
+            .collect();
+        Ok(Self {
             critters,
             coupling,
             reverb_send,
-            was_high: vec![false; count],
-        }
+            scene,
+            paths,
+            listener_paths,
+            listener_delays,
+            arrivals: BinaryHeap::with_capacity(count * count * 2),
+            sample: 0,
+            stats: HearingStats::default(),
+        })
     }
 
     pub fn reverb_send(&self) -> f32 {
         self.reverb_send
     }
 
-    /// The Kuramoto order parameter of the flock's behavioural clocks: 0 when
-    /// their phases are scattered, 1 when they fire as one. Watching this rise
-    /// is watching the chorus find its rhythm.
+    /// Linear background level at each animal's ears. The world supplies an
+    /// estimate from its environmental sounds; audibility requires a 2:1
+    /// call/background ratio as well as the absolute hearing threshold.
+    pub fn set_masking_level(&mut self, level: f32) {
+        self.scene.masking_level = if level.is_finite() {
+            level.max(0.0)
+        } else {
+            0.0
+        };
+    }
+
+    pub(crate) fn hearing_stats(&self) -> HearingStats {
+        self.stats
+    }
+
+    /// Kuramoto order of behavioural clocks, not a claim of audible synchrony.
     pub fn order(&self) -> f32 {
-        let n = self.critters.len();
-        if n == 0 {
-            return 0.0;
+        let (mut x, mut y) = (0.0f32, 0.0f32);
+        for critter in &self.critters {
+            let phase = TAU * critter.phase();
+            x += phase.cos();
+            y += phase.sin();
         }
-        let (mut sx, mut sy) = (0.0f32, 0.0f32);
-        for c in &self.critters {
-            let a = std::f32::consts::TAU * c.phase();
-            sx += a.cos();
-            sy += a.sin();
-        }
-        ((sx * sx + sy * sy).sqrt()) / n as f32
+        x.hypot(y) / self.critters.len().max(1) as f32
     }
 
     pub fn process(&mut self) -> (f32, f32) {
-        // Detect fresh firings (clock just wrapped past the near-fire mark) and
-        // kick everyone else. Positive coupling pulls the flock together;
-        // negative makes them alternate.
-        let n = self.critters.len();
-        let mut fired: Option<usize> = None;
-        for i in 0..n {
-            let p = self.critters[i].phase();
-            let high = p > 0.92;
-            if high && !self.was_high[i] {
-                fired = Some(i);
-            }
-            self.was_high[i] = high;
-        }
-        if let Some(f) = fired {
-            if self.coupling.abs() > 1e-6 {
-                for j in 0..n {
-                    if j != f {
-                        self.critters[j].kick(self.coupling);
-                    }
-                }
+        // Receive before advancing voices. The queue includes every source,
+        // so simultaneous onsets are not silently reduced to one caller.
+        while self.arrivals.peek().is_some_and(|a| a.at <= self.sample) {
+            let arrival = self.arrivals.pop().unwrap();
+            self.stats.arrived_calls += 1;
+            let threshold = self
+                .scene
+                .hearing_threshold
+                .max(2.0 * self.scene.masking_level);
+            if arrival.level > threshold {
+                self.stats.heard_calls += 1;
+                self.critters[arrival.receiver].kick(self.coupling * arrival.gain);
+            } else {
+                self.stats.masked_calls += 1;
             }
         }
 
-        let mut l = 0.0;
-        let mut r = 0.0;
-        for c in &mut self.critters {
-            let (x, y) = c.process();
-            l += x;
-            r += y;
+        let (mut left, mut right) = (0.0, 0.0);
+        let count = self.critters.len();
+        for source in 0..count {
+            let out = self.critters[source].process_mono();
+            if let Some(level) = self.critters[source].emitted_level {
+                self.stats.emitted_calls += 1;
+                for receiver in 0..count {
+                    if receiver != source {
+                        let path = self.paths[source * count + receiver];
+                        self.arrivals.push(Arrival {
+                            at: self.sample + path.delay_samples as u64,
+                            source,
+                            receiver,
+                            level: level * path.gain,
+                            gain: path.gain,
+                        });
+                    }
+                }
+            }
+            let path = self.listener_paths[source];
+            let received = self.listener_delays[source].process(out) * path.gain;
+            let (l, r) = pan(received, path.pan);
+            left += l;
+            right += r;
         }
-        (l, r)
+        self.sample += 1;
+        (left, right)
+    }
+}
+
+#[cfg(test)]
+mod hearing_tests {
+    use super::*;
+    use crate::acoustics::Point;
+
+    fn pair(sr: f32, distance: f32, threshold: f32) -> Chorus {
+        let mut scene = HearingScene::meadow(2);
+        scene.positions = vec![
+            Point { x: 0.0, y: 0.0 },
+            Point {
+                x: distance,
+                y: 0.0,
+            },
+        ];
+        scene.sound_speed = 10.0;
+        scene.hearing_threshold = threshold;
+        scene.masking_level = 0.0;
+        let mut species = Species::cricket();
+        species.carrier_lo = 73.0;
+        species.carrier_hi = 73.0;
+        species.pulse_rate = 0.0;
+        let mut chorus = Chorus::with_scene(species, 0.1, sr, 91, scene).unwrap();
+        chorus.critters[0].phrase_phase = 0.999;
+        chorus.critters[0].phrase_inc = 0.01;
+        chorus.critters[1].phrase_phase = 0.2;
+        chorus.critters[1].phrase_inc = 0.0;
+        chorus
+    }
+
+    #[test]
+    fn an_actual_emission_must_precede_delayed_hearing() {
+        let mut chorus = pair(1_000.0, 1.0, 0.001);
+        let mut emission_at = None;
+        for sample in 0..150 {
+            chorus.process();
+            if chorus.hearing_stats().emitted_calls > 0 && emission_at.is_none() {
+                emission_at = Some(sample);
+            }
+            if emission_at.is_none_or(|at| sample < at + 100) {
+                assert_eq!(chorus.hearing_stats().heard_calls, 0);
+                assert_eq!(chorus.critters[1].phase(), 0.2);
+            } else {
+                assert_eq!(sample, emission_at.unwrap() + 100);
+                assert_eq!(chorus.hearing_stats().heard_calls, 1);
+                assert!(chorus.critters[1].phase() > 0.2);
+                return;
+            }
+        }
+        panic!("expected a delayed received call");
+    }
+
+    #[test]
+    fn near_fire_clock_without_sound_cannot_send_a_call() {
+        let mut chorus = pair(1_000.0, 1.0, 0.001);
+        chorus.critters[0].phrase_phase = 0.95;
+        chorus.critters[0].phrase_inc = 0.0;
+        for _ in 0..500 {
+            chorus.process();
+        }
+        assert_eq!(chorus.hearing_stats(), HearingStats::default());
+        assert_eq!(chorus.critters[1].phase(), 0.2);
+    }
+
+    #[test]
+    fn a_masked_call_arrives_but_cannot_nudge_the_receiver() {
+        let mut chorus = pair(1_000.0, 1.0, 0.001);
+        chorus.set_masking_level(1.0);
+        for _ in 0..150 {
+            chorus.process();
+        }
+        assert!(chorus.hearing_stats().arrived_calls > 0);
+        assert_eq!(chorus.hearing_stats().heard_calls, 0);
+        assert_eq!(chorus.critters[1].phase(), 0.2);
+    }
+
+    #[test]
+    fn distance_can_make_a_call_inaudible() {
+        let mut near = pair(1_000.0, 1.0, 0.025);
+        let mut far = pair(1_000.0, 20.0, 0.025);
+        for _ in 0..2_500 {
+            near.process();
+            far.process();
+        }
+        assert!(near.hearing_stats().heard_calls > 0);
+        assert!(far.hearing_stats().arrived_calls > 0);
+        assert_eq!(far.hearing_stats().heard_calls, 0);
+        assert_eq!(far.critters[1].phase(), 0.2);
+    }
+
+    #[test]
+    fn simultaneous_callers_both_reach_the_queue() {
+        let mut chorus = pair(1_000.0, 1.0, 0.001);
+        chorus.critters[1].phrase_phase = 0.999;
+        chorus.critters[1].phrase_inc = 0.01;
+        for _ in 0..150 {
+            chorus.process();
+        }
+        assert_eq!(chorus.hearing_stats().emitted_calls, 2);
+        assert_eq!(chorus.hearing_stats().heard_calls, 2);
+    }
+
+    #[test]
+    fn barrier_changes_local_hearing_and_remains_deterministic() {
+        let mut open = Chorus::with_scene(
+            Species::cricket(),
+            0.12,
+            48_000.0,
+            12345,
+            HearingScene::two_groups(false),
+        )
+        .unwrap();
+        let mut barrier = Chorus::with_scene(
+            Species::cricket(),
+            0.12,
+            48_000.0,
+            12345,
+            HearingScene::two_groups(true),
+        )
+        .unwrap();
+        let mut repeat = Chorus::with_scene(
+            Species::cricket(),
+            0.12,
+            48_000.0,
+            12345,
+            HearingScene::two_groups(true),
+        )
+        .unwrap();
+        let open_capacity = open.arrivals.capacity();
+        let barrier_capacity = barrier.arrivals.capacity();
+        for _ in 0..48_000 * 3 {
+            let a = open.process();
+            let b = barrier.process();
+            assert_eq!(b, repeat.process());
+            for sample in [a.0, a.1, b.0, b.1] {
+                assert!(sample.is_finite() && sample.abs() < 1.0);
+            }
+        }
+        assert!(open.hearing_stats().heard_calls > 0);
+        assert_eq!(open.hearing_stats().masked_calls, 0);
+        assert!(barrier.hearing_stats().heard_calls > 0);
+        assert!(barrier.hearing_stats().masked_calls > 0);
+        assert_eq!(barrier.hearing_stats(), repeat.hearing_stats());
+        assert_eq!(open.arrivals.capacity(), open_capacity);
+        assert_eq!(barrier.arrivals.capacity(), barrier_capacity);
     }
 }

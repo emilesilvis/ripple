@@ -7,6 +7,8 @@
 //! is a reading of the world as it stands — the resonators still ringing, the
 //! turbulence still hissing — gathered at two ears and returned as stereo.
 
+use crate::bubbles::BubbleCloud;
+use crate::contacts::ChimeRig;
 use crate::critters::{Chorus, Species};
 use crate::dsp::{pan, Noise, Space};
 use crate::field::{Event, Field, Surface};
@@ -38,7 +40,16 @@ struct Bubble {
 
 impl Bubble {
     fn inactive(sr: f32) -> Self {
-        Self { active: false, phase: 0.0, freq: 0.0, freq_rise: 0.0, amp: 0.0, decay: 0.0, pan: 0.5, sr }
+        Self {
+            active: false,
+            phase: 0.0,
+            freq: 0.0,
+            freq_rise: 0.0,
+            amp: 0.0,
+            decay: 0.0,
+            pan: 0.5,
+            sr,
+        }
     }
     fn spawn(&mut self, freq: f32, energy: f32, pan: f32, rng: &mut Noise) {
         let dur = rng.range(0.015, 0.06);
@@ -70,6 +81,7 @@ impl Bubble {
 struct Chime {
     body: Body,
     pan: f32,
+    length_m: f32,
 }
 
 /// A critter chorus with its gain and when it is awake.
@@ -101,7 +113,8 @@ pub struct World {
     roof: Option<Body>, // a corrugated steel sheet for rain to drum on
     fire_wood: Option<Body>,
     chimes: Vec<Chime>,
-    chime_gain: f32,
+    chime_rig: Option<ChimeRig>,
+    chime_strikes: u64,
 
     // Wind whistle band (resonant turbulence through an aperture).
     whistle: Option<Turbulence>,
@@ -114,6 +127,9 @@ pub struct World {
 
     // Transient pools.
     bubbles: Vec<Bubble>,
+    clouds: Vec<BubbleCloud>,
+
+    control_seconds: f64,
 
     // Living voices.
     choruses: Vec<Voices>,
@@ -132,7 +148,14 @@ pub struct World {
 }
 
 impl World {
-    pub fn new(sr: f32, seed: u32, climate: Climate, field_w: usize, field_h: usize, cell: f32) -> Self {
+    pub fn new(
+        sr: f32,
+        seed: u32,
+        climate: Climate,
+        field_w: usize,
+        field_h: usize,
+        cell: f32,
+    ) -> Self {
         Self {
             sr,
             seed,
@@ -148,13 +171,16 @@ impl World {
             roof: None,
             fire_wood: None,
             chimes: Vec::new(),
-            chime_gain: 0.0,
+            chime_rig: None,
+            chime_strikes: 0,
             whistle: None,
             fire_activity: 0.6,
             fire_activity_target: 0.6,
             fire_activity_timer: 0.0,
             fire_gain: 0.0,
             bubbles: vec![Bubble::inactive(sr); 24],
+            clouds: vec![BubbleCloud::new(sr); 24],
+            control_seconds: 0.0,
             choruses: Vec::new(),
             rain_gain: 0.0,
             space_l: Space::new(sr, 1.0),
@@ -183,17 +209,34 @@ impl World {
 
     /// Water running over its bed: capillary-scale surface eddies, ~1 m/s.
     pub fn enable_stream(&mut self, gain: f32) {
-        self.stream =
-            Some((Turbulence::new(Eddies::free_shear(1.0e-4, 1.2), self.sr, self.seed ^ 0x57, gain), 0.06));
+        self.stream = Some((
+            Turbulence::new(
+                Eddies::free_shear(1.0e-4, 1.2),
+                self.sr,
+                self.seed ^ 0x57,
+                gain,
+            ),
+            0.06,
+        ));
     }
     /// Foam churning in the surf zone: finer spray eddies, faster water.
     pub fn enable_surf(&mut self, gain: f32) {
-        self.surf = Some(Turbulence::new(Eddies::free_shear(1.5e-4, 3.0), self.sr, self.seed ^ 0x5f, gain));
+        self.surf = Some(Turbulence::new(
+            Eddies::free_shear(1.5e-4, 3.0),
+            self.sr,
+            self.seed ^ 0x5f,
+            gain,
+        ));
     }
     /// Air shearing past the listener (millimetre eddies, gale at speed 1),
     /// plus a whistling crack — the same law through a resonant aperture.
     pub fn enable_wind(&mut self, gain: f32) {
-        self.wind = Some(Turbulence::new(Eddies::free_shear(3.0e-3, 14.0), self.sr, self.seed ^ 0x1d, gain));
+        self.wind = Some(Turbulence::new(
+            Eddies::free_shear(3.0e-3, 14.0),
+            self.sr,
+            self.seed ^ 0x1d,
+            gain,
+        ));
         self.whistle = Some(Turbulence::new(
             Eddies::aperture(1.0e-3, 14.0, 9.0),
             self.sr,
@@ -204,13 +247,31 @@ impl World {
     /// Air torn at leaf edges: the smallest eddies in the world, hence the
     /// highest voice.
     pub fn enable_leaves(&mut self, gain: f32) {
-        self.leaves = Some(Turbulence::new(Eddies::free_shear(3.0e-4, 14.0), self.sr, self.seed ^ 0x1f, gain));
+        self.leaves = Some(Turbulence::new(
+            Eddies::free_shear(3.0e-4, 14.0),
+            self.sr,
+            self.seed ^ 0x1f,
+            gain,
+        ));
     }
     /// A fire: a buoyant plume of slowish air (the rumble) over a wooden log
     /// — a real bar of wood — that pops as pockets burst against it.
     pub fn enable_fire(&mut self, gain: f32) {
-        self.flame = Some(Turbulence::new(Eddies::free_shear(1.0e-3, 2.5), self.sr, self.seed ^ 0xf1, gain));
-        self.fire_wood = Some(Body::bar(&Matter::wood(), 1.2, 0.10, 12, self.sr, self.seed ^ 0xf2, gain * 28.0));
+        self.flame = Some(Turbulence::new(
+            Eddies::free_shear(1.0e-3, 2.5),
+            self.sr,
+            self.seed ^ 0xf1,
+            gain,
+        ));
+        self.fire_wood = Some(Body::bar(
+            &Matter::wood(),
+            1.2,
+            0.10,
+            12,
+            self.sr,
+            self.seed ^ 0xf2,
+            gain * 28.0,
+        ));
         self.fire_gain = gain;
     }
     /// Rain. If there is a roof, it is an actual corrugated steel sheet —
@@ -221,8 +282,16 @@ impl World {
     pub fn enable_rain(&mut self, gain: f32, on_roof: bool) {
         self.rain_gain = gain;
         if on_roof {
-            self.roof =
-                Some(Body::sheet(&Matter::steel(), 0.25, 0.18, 0.02, 7, self.sr, self.seed ^ 0x2a, gain * 36.0));
+            self.roof = Some(Body::sheet(
+                &Matter::steel(),
+                0.25,
+                0.18,
+                0.02,
+                7,
+                self.sr,
+                self.seed ^ 0x2a,
+                gain * 36.0,
+            ));
         }
     }
     /// Hang a set of steel bars. The preset hands over *pitches* only in the
@@ -230,19 +299,49 @@ impl World {
     /// the bending law, and from then on the bar rings entirely on its own —
     /// overtones, click and decay are the lattice's business.
     pub fn add_chimes(&mut self, freqs: &[f32], gain: f32) {
-        self.chime_gain = gain;
         let steel = Matter::steel();
         const THICKNESS: f32 = 0.022;
         const NODES: usize = 14;
         for (i, f) in freqs.iter().enumerate() {
             let length = bar_length_for_pitch(&steel, THICKNESS, NODES, *f);
-            let body = Body::bar(&steel, length, THICKNESS, NODES, self.sr, self.seed ^ (0x3a + i as u32), gain * 60.0);
-            self.chimes.push(Chime { body, pan: 0.15 + 0.7 * (i as f32 / freqs.len().max(1) as f32) });
+            let body = Body::bar(
+                &steel,
+                length,
+                THICKNESS,
+                NODES,
+                self.sr,
+                self.seed ^ (0x3a + i as u32),
+                gain * 60.0,
+            );
+            self.chimes.push(Chime {
+                body,
+                pan: 0.15 + 0.7 * (i as f32 / freqs.len().max(1) as f32),
+                length_m: length,
+            });
         }
+        let lengths: Vec<f32> = self.chimes.iter().map(|chime| chime.length_m).collect();
+        self.chime_rig = Some(ChimeRig::new(&lengths, self.seed));
     }
-    pub fn add_chorus(&mut self, sp: Species, count: usize, coupling: f32, gain: f32, nocturnal: f32) {
-        let chorus = Chorus::new(sp, count, coupling, self.sr, self.seed.wrapping_add(0x600d + count as u32));
-        self.choruses.push(Voices { chorus, gain, nocturnal });
+    pub fn add_chorus(
+        &mut self,
+        sp: Species,
+        count: usize,
+        coupling: f32,
+        gain: f32,
+        nocturnal: f32,
+    ) {
+        let chorus = Chorus::new(
+            sp,
+            count,
+            coupling,
+            self.sr,
+            self.seed.wrapping_add(0x600d + count as u32),
+        );
+        self.choruses.push(Voices {
+            chorus,
+            gain,
+            nocturnal,
+        });
     }
 
     // --- the running world -------------------------------------------------
@@ -251,6 +350,7 @@ impl World {
         let dt = BLOCK as f32 / self.sr;
         self.sky.step(dt);
         self.field.step(dt);
+        self.control_seconds += dt as f64;
 
         // Rain: rainfall becomes falling drops that land on whatever is below.
         if self.rain_gain > 0.0 {
@@ -272,7 +372,7 @@ impl World {
                     }
                     Surface::Open | Surface::Rock => {
                         // The drop soaks in — this is how rain swells the brook.
-                        self.field.add_water(nx, ny, energy * 0.006);
+                        self.field.rain_on(nx, ny, energy * 0.006);
                         // A drop punching into water entrains a tiny bubble;
                         // its Minnaert ring is the plink of rain on a pond.
                         let radius_m = self.rng.range(0.8e-3, 2.5e-3);
@@ -296,21 +396,30 @@ impl World {
             surf.drive(flow_e * 0.6 + 0.12, flow_s);
         }
 
-        // Field events (bubbles in the brook, foam at the shore).
-        let events: Vec<Event> = self.field.drain_events().collect();
-        for ev in events {
+        // Each entrainment event divides its gas volume among eight coupled
+        // members; the separate raindrop pool keeps isolated plinks distinct.
+        for ev in self.field.drain_events() {
             match ev {
-                Event::Bubble { pan, radius_m, energy } => {
-                    if let Some(b) = self.bubbles.iter_mut().find(|b| !b.active) {
-                        b.spawn(minnaert_hz(radius_m), energy, pan, &mut self.rng);
+                Event::Bubble {
+                    pan,
+                    radius_m,
+                    energy,
+                } => {
+                    if let Some(cloud) = self.clouds.iter_mut().find(|cloud| !cloud.is_active()) {
+                        cloud.spawn(radius_m, energy, pan);
                     }
                 }
                 Event::Break { pan, energy } => {
                     if let Some(surf) = &mut self.surf {
-                        // A break is a sudden surge in the foam.
                         surf.drive(energy + 0.2, 0.9);
                     }
-                    let _ = pan;
+                    // Breaking foam entrains a small gas packet as well as
+                    // driving the continuous surf. Its equivalent volume is
+                    // set by break strength; this is a coarse entrainment law.
+                    if let Some(cloud) = self.clouds.iter_mut().find(|cloud| !cloud.is_active()) {
+                        let radius_m = 0.003 + 0.006 * (energy / 0.6).clamp(0.0, 1.0);
+                        cloud.spawn(radius_m, energy * 0.15, pan);
+                    }
                 }
             }
         }
@@ -318,6 +427,13 @@ impl World {
         // Wind and leaves ride the sky's air speed.
         let air = self.sky.air_speed();
         let gust = self.sky.gust();
+        // A shared diffuse noise estimate at the animals' ears. This is a
+        // coarse masking floor, not a resolved local acoustic field.
+        for voices in &mut self.choruses {
+            voices
+                .chorus
+                .set_masking_level(0.001 + flow_e * 0.006 + air * 0.0005);
+        }
         if let Some(wind) = &mut self.wind {
             wind.drive(0.15 + 0.85 * air, air);
         }
@@ -330,17 +446,30 @@ impl World {
             leaves.drive(0.1 + 0.9 * air * gust, air);
         }
 
-        // Wind strikes the chimes: a strong gust nudges them into voice.
-        if !self.chimes.is_empty() && gust > 0.6 {
-            let p = (gust - 0.6) * 0.12;
-            if self.rng.chance(p) {
-                let i = (self.rng.unit() * self.chimes.len() as f32) as usize % self.chimes.len();
-                let energy = self.rng.range(0.15, 0.4) * gust;
-                // The gust shoves the bar somewhere along its length; where it
-                // lands decides which modes wake, so no two strikes ring alike.
-                let at = self.rng.range(0.15, 0.85);
-                self.chimes[i].body.strike(energy, at);
-            }
+        if let Some(rig) = &mut self.chime_rig {
+            // Chimes hang under a canopy/roof: their site receives half the
+            // exposed listener's 14 m/s reference wind. This sheltered site
+            // keeps the suspension model in its small-angle operating range.
+            // Direction drifts continuously; it never schedules a strike.
+            let direction = self.seed as f64 / u32::MAX as f64 * std::f64::consts::TAU
+                + 0.35 * (self.control_seconds * 0.19).sin()
+                + 0.3 * (gust as f64 - 0.5);
+            let speed = air * 7.0;
+            let chimes = &mut self.chimes;
+            let strikes = &mut self.chime_strikes;
+            rig.step(
+                dt,
+                [
+                    speed * direction.cos() as f32,
+                    speed * direction.sin() as f32,
+                ],
+                |impact| {
+                    chimes[impact.bar]
+                        .body
+                        .strike(impact.velocity_kick, impact.position);
+                    *strikes += 1;
+                },
+            );
         }
 
         // Fire: heat flares and settles; embers pop at a rate that follows it.
@@ -350,7 +479,8 @@ impl World {
                 self.fire_activity_target = self.rng.range(0.3, 1.0);
                 self.fire_activity_timer = self.rng.range(4.0, 12.0);
             }
-            self.fire_activity += (self.fire_activity_target - self.fire_activity) * (dt / 3.0).min(1.0);
+            self.fire_activity +=
+                (self.fire_activity_target - self.fire_activity) * (dt / 3.0).min(1.0);
             let act = self.fire_activity;
             if let Some(flame) = &mut self.flame {
                 flame.drive(0.35 + 0.65 * act, act);
@@ -365,7 +495,11 @@ impl World {
                 for _ in 0..n {
                     // Most pops are small and bright; a few are big log-shifts.
                     let big = self.rng.chance(0.07);
-                    let energy = if big { self.rng.range(0.5, 0.9) } else { self.rng.range(0.08, 0.4) };
+                    let energy = if big {
+                        self.rng.range(0.5, 0.9)
+                    } else {
+                        self.rng.range(0.08, 0.4)
+                    };
                     wood.strike(energy, self.rng.range(0.3, 0.7));
                 }
             }
@@ -383,24 +517,37 @@ impl World {
             bubbles += self.bubbles.iter().filter(|b| b.active).count();
             if i % per_sec == 0 {
                 let (e, s) = self.field.flow();
+                let history = self.field.history_stats();
+                let soil = history.retained_water_m3;
+                let stored = history.surface_water_m3 + soil;
+                let contact = self
+                    .chime_rig
+                    .as_ref()
+                    .map(ChimeRig::diagnostics)
+                    .unwrap_or_default();
                 println!(
-                    "t={:>4.0}s  flow_e={:.3} flow_s={:.3}  water={:.3}  rain={:.2} air={:.2} gust={:.2}  bubbles~{}",
+                    "t={:>4.0}s  flow_e={:.3} flow_s={:.3}  water={:.3} soil={:.5} total={:.3}m3  rain={:.2} air={:.2} gust={:.2}  drops~{} contacts={} angle={:.3}",
                     i as f32 * BLOCK as f32 / self.sr,
                     e,
                     s,
                     self.field.total_water(),
+                    soil,
+                    stored,
                     self.sky.rain(),
                     self.sky.air_speed(),
                     self.sky.gust(),
                     bubbles / per_sec.max(1),
+                    self.chime_strikes,
+                    contact.max_suspension_angle_rad,
                 );
                 bubbles = 0;
             }
         }
     }
 
-    /// Step the physics and report the synchrony (Kuramoto order) of the first
-    /// critter chorus each second — for watching a rhythm emerge.
+    /// Advance the actual audio timeline and inspect the first population's
+    /// behavioral-clock phase order plus emitted and received calls. A high
+    /// phase order is not a guarantee that audible syllables coincide.
     pub fn probe_sync(&mut self, seconds: f32) {
         if self.choruses.is_empty() {
             println!("(this world has no chorus)");
@@ -408,12 +555,22 @@ impl World {
         }
         let sr = self.sr as usize;
         let total = (seconds * self.sr) as usize;
-        for i in 0..total {
-            self.next_sample(); // advances the choruses (and everything else)
-            if i % sr == 0 {
-                let r = self.choruses[0].chorus.order();
-                let bar = "#".repeat((r * 40.0) as usize);
-                println!("t={:>4.0}s  order={:.3}  {}", i as f32 / self.sr, r, bar);
+        for completed in 1..=total {
+            self.next_sample();
+            if completed % sr == 0 || completed == total {
+                let chorus = &self.choruses[0].chorus;
+                let order = chorus.order();
+                let hearing = chorus.hearing_stats();
+                let bar = "#".repeat((order * 40.0) as usize);
+                println!(
+                    "t={:>7.3}s  order={:.3} emitted={} heard={} masked={}  {}",
+                    completed as f64 / self.sr as f64,
+                    order,
+                    hearing.emitted_calls,
+                    hearing.heard_calls,
+                    hearing.masked_calls,
+                    bar
+                );
             }
         }
     }
@@ -500,6 +657,12 @@ impl World {
             r += y;
         }
 
+        for cloud in &mut self.clouds {
+            let (x, y) = cloud.process();
+            l += x;
+            r += y;
+        }
+
         // Living voices, weighted by time of day.
         let night = self.sky.night();
         let day = 1.0 - night;
@@ -531,5 +694,52 @@ impl World {
 
         // Cushioned master soft-clip.
         ((l * 0.8).tanh() * 0.9, (r * 0.8).tanh() * 0.9)
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "30-second physical integration audit across flowing-water presets"]
+    fn flowing_presets_drive_suspensions_clouds_and_active_history() {
+        for name in ["glade", "brook", "cozy-rain", "shore", "storm"] {
+            let mut world = crate::presets::build(name, 48_000.0, 12345).unwrap();
+            let mut cloud_seen = false;
+            for sample in 0..48_000 * 30 {
+                let sound = world.next_sample();
+                assert!(sound.0.is_finite() && sound.1.is_finite());
+                if sample % BLOCK == 0 {
+                    cloud_seen |= world.clouds.iter().any(BubbleCloud::is_active);
+                }
+            }
+            let history = world.field.history_stats();
+            let angle = world
+                .chime_rig
+                .as_ref()
+                .map_or(0.0, |rig| rig.diagnostics().max_suspension_angle_rad);
+            println!("{name}: contacts={}, cloud_seen={cloud_seen}, max_angle={angle:.6}, retained_m3={:.9}, mobile_solid_m3={:.9}",
+                world.chime_strikes, history.retained_water_m3, history.suspended_solid_m3 + history.exported_solid_m3);
+            // The stream presets churn continuously; a gentle sea can stay
+            // below the field's breaking/entrainment threshold for this seed.
+            if name != "shore" {
+                assert!(cloud_seen, "{name}: churn must activate the cloud pool");
+            }
+            assert!(
+                history.suspended_solid_m3 + history.exported_solid_m3 > 0.0,
+                "{name}: moving water must change its bed"
+            );
+            if world.chime_rig.is_some() {
+                assert!(
+                    world.chime_rig.as_ref().unwrap().diagnostics().wind_work_j > 0.0,
+                    "{name}: air must do work on the suspension"
+                );
+                assert!(
+                    angle < 0.3,
+                    "{name}: small-angle approximation exceeded: {angle}"
+                );
+            }
+        }
     }
 }

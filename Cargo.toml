@@ -8,6 +8,7 @@ description = "A tiny simulated world whose gentle soundscapes emerge from a few
 cpal = "0.15"
 rand = { version = "0.8", features = ["small_rng"] }
 hound = "3.5"
+crossterm = "0.29"
 
 [profile.release]
 opt-level = 3

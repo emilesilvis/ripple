@@ -21,21 +21,48 @@ pub struct PresetInfo {
 pub const DEFAULT: &str = "glade";
 
 pub const PRESETS: &[PresetInfo] = &[
-    PresetInfo { name: "glade", description: "a brook through a clearing, birds and leaves by day" },
-    PresetInfo { name: "brook", description: "just water finding its way down a rocky channel" },
-    PresetInfo { name: "cozy-rain", description: "rain on a tin roof, a swelling brook, wind chimes" },
-    PresetInfo { name: "night-meadow", description: "crickets in rhythm, frogs taking turns, a far owl" },
-    PresetInfo { name: "shore", description: "an ocean swell breaking up a beach, gulls, sea wind" },
-    PresetInfo { name: "hearth", description: "a campfire on a still night, crickets, a breeze" },
-    PresetInfo { name: "mountain", description: "wind over a high ridge, leaves, the odd bird" },
-    PresetInfo { name: "storm", description: "a passing downpour: heavy rain, gusting wind, a full brook" },
+    PresetInfo {
+        name: "glade",
+        description: "a brook through a clearing, birds and leaves by day",
+    },
+    PresetInfo {
+        name: "brook",
+        description: "just water finding its way down a rocky channel",
+    },
+    PresetInfo {
+        name: "cozy-rain",
+        description: "rain on a tin roof, a swelling brook, wind chimes",
+    },
+    PresetInfo {
+        name: "night-meadow",
+        description: "crickets in rhythm, frogs taking turns, a far owl",
+    },
+    PresetInfo {
+        name: "shore",
+        description: "an ocean swell breaking up a beach, gulls, sea wind",
+    },
+    PresetInfo {
+        name: "hearth",
+        description: "a campfire on a still night, crickets, a breeze",
+    },
+    PresetInfo {
+        name: "mountain",
+        description: "wind over a high ridge, leaves, the odd bird",
+    },
+    PresetInfo {
+        name: "storm",
+        description: "a passing downpour: heavy rain, gusting wind, a full brook",
+    },
 ];
 
 /// The chime-maker's pitches: C-major pentatonic, C4..A5. Only the *tuning
 /// intent* lives here — each pitch is inverted into a bar length, and the
 /// hung bar rings whatever the lattice decides.
 fn pentatonic() -> Vec<f32> {
-    [0, 4, 7, 9, 12, 16, 19].iter().map(|s| 261.63 * 2f32.powf(*s as f32 / 12.0)).collect()
+    [0, 4, 7, 9, 12, 16, 19]
+        .iter()
+        .map(|s| 261.63 * 2f32.powf(*s as f32 / 12.0))
+        .collect()
 }
 
 /// Tectonics: raise a tilted block with gentle random undulations. No valley
@@ -150,7 +177,7 @@ fn roof_off_the_stream(w: &mut World) {
 }
 
 pub fn build(name: &str, sr: f32, seed: u32) -> Option<World> {
-    let w = match name {
+    let mut w = match name {
         "glade" => {
             let mut w = World::new(sr, seed, Climate::calm_day(), 20, 44, 0.2);
             uplift(&mut w, seed, 0.05, 0.12);
@@ -235,6 +262,9 @@ pub fn build(name: &str, sr: f32, seed: u32) -> Option<World> {
         }
         _ => return None,
     };
+    // The geological epoch defines the starting bed; only then does live
+    // rainfall retention and sediment transport begin.
+    w.field_mut().enable_history();
     Some(w)
 }
 
@@ -254,18 +284,29 @@ mod tests {
             let mut rock = 0;
             for y in 0..height {
                 for x in 0..width {
-                    if f.surface_at(x as f32 / width as f32, y as f32 / height as f32) == Surface::Rock {
+                    if f.surface_at(x as f32 / width as f32, y as f32 / height as f32)
+                        == Surface::Rock
+                    {
                         rock += 1;
                     }
                 }
             }
             let total = width * height;
-            assert!(rock > total / 50, "geology should scour some cells to rock (got {rock})");
-            assert!(rock < total / 2, "geology should not scour everything (got {rock}/{total})");
+            assert!(
+                rock > total / 50,
+                "geology should scour some cells to rock (got {rock})"
+            );
+            assert!(
+                rock < total / 2,
+                "geology should not scour everything (got {rock}/{total})"
+            );
         }
         // Let the spring refill its channel, then listen to the water.
         w.probe(12.0);
         let (flow_e, _) = w.field_mut().flow();
-        assert!(flow_e > 0.02, "the brook should be running and churning (flow_e = {flow_e})");
+        assert!(
+            flow_e > 0.02,
+            "the brook should be running and churning (flow_e = {flow_e})"
+        );
     }
 }
