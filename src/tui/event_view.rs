@@ -20,6 +20,20 @@ pub(super) struct EventView {
 }
 
 impl EventView {
+    /// Short event marks use simulation time and never include observations
+    /// newer than the displayed state. Holding/filtering the log has no effect.
+    pub(super) fn recent(&self, generation: u64, seconds: f64) -> impl Iterator<Item = &Record> {
+        self.history.iter().filter(move |r| {
+            self.generation == generation
+                && r.time_seconds <= seconds
+                && seconds - r.time_seconds <= 0.5
+        })
+    }
+
+    pub(super) fn lost(&self) -> u64 {
+        self.lost
+    }
+
     pub fn receive(&mut self, batch: Batch, generation: u64) {
         self.set_generation(generation);
         if batch.generation != generation {

@@ -210,6 +210,29 @@ impl World {
         self.events.drain(batch);
     }
 
+    pub(crate) fn visualize(&self, frame: &mut crate::visual::Frame) {
+        frame.clear();
+        frame.ready = true;
+        frame.seed = self.seed;
+        self.field.visualize(frame);
+        frame.air = self.sky.air_speed();
+        frame.rain = self.sky.rain();
+        frame.daylight = self.sky.daylight();
+        frame.fire = (self.fire_gain > 0.0).then_some(self.fire_activity);
+        frame.bubbles = self.bubbles.iter().filter(|b| b.active).count();
+        frame.clouds = self.clouds.iter().filter(|c| c.is_active()).count();
+        if let Some(rig) = &self.chime_rig {
+            rig.visualize(frame);
+        }
+        for (i, voice) in self.choruses.iter().enumerate() {
+            let wake =
+                voice.nocturnal * self.sky.night() + (1.0 - voice.nocturnal) * self.sky.daylight();
+            voice
+                .chorus
+                .visualize(frame, i, voice.gain * wake, wake >= 1e-3);
+        }
+    }
+
     // --- assembly (called by presets) --------------------------------------
 
     pub fn field_mut(&mut self) -> &mut Field {

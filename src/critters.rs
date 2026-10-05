@@ -402,6 +402,29 @@ pub struct Chorus {
 }
 
 impl Chorus {
+    pub(crate) fn visualize(
+        &self,
+        frame: &mut crate::visual::Frame,
+        population: usize,
+        gain: f32,
+        awake: bool,
+    ) {
+        frame.populations.push(crate::visual::Population {
+            listener: self.scene.listener,
+            barrier: self.scene.barrier,
+            sound_speed: self.scene.sound_speed,
+            gain,
+        });
+        for (index, critter) in self.critters.iter().enumerate() {
+            frame.animals.push(crate::visual::Animal {
+                population,
+                index,
+                position: self.scene.positions[index],
+                calling: awake && critter.active,
+            });
+        }
+    }
+
     pub fn new(sp: Species, count: usize, coupling: f32, sr: f32, seed: u32) -> Self {
         Self::with_scene(sp, coupling, sr, seed, HearingScene::meadow(count))
             .expect("default hearing scene is valid")

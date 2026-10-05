@@ -16,8 +16,10 @@ use std::time::{Duration, Instant};
 
 mod activity;
 mod event_view;
+mod visualization;
 pub mod library;
 use event_view::EventView;
+use visualization::Visualization;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 type Metrics = [(&'static str, [f64; 2], &'static str); 4];
@@ -36,6 +38,15 @@ impl From<World> for Source {
 }
 
 impl Source {
+    fn visualize(&self, frame: &mut crate::visual::Frame) {
+        match self {
+            Self::World(world) => world.visualize(frame),
+            Self::Alien(demo) => demo.visualize(frame),
+            Self::Discovered(world) => world.visualize(frame),
+            Self::Silence => frame.clear(),
+        }
+    }
+
     fn build(selection: usize, sr: f32, seed: u32, discovery: Option<&alien::Discovery>) -> Self {
         match discovery {
             Some(discovery) => {
@@ -119,6 +130,7 @@ struct Player {
     deferred_retirement: Option<Source>,
     event_sender: Option<SyncSender<crate::events::Batch>>,
     events_lost: u64,
+    visual: Option<crate::visual::Shared>,
     generation: u64,
     volume: f32,
     volume_target: f32,
@@ -149,6 +161,7 @@ impl Player {
             deferred_retirement: None,
             event_sender: None,
             events_lost: 0,
+            visual: None,
             generation: 0,
             volume: 0.0,
             volume_target: 0.7,
@@ -167,6 +180,24 @@ impl Player {
         self.world.observe();
         self.event_sender = Some(sender);
         self
+    }
+
+    fn visualizing(mut self, shared: crate::visual::Shared) -> Self {
+        self.visual = Some(shared);
+        self.publish_visual();
+        self
+    }
+
+    fn publish_visual(&self) {
+        if let Some(shared) = &self.visual {
+            // The UI may be copying the previous frame. Skip this observation
+            // instead of ever waiting for rendering on the audio thread.
+            if let Ok(mut frame) = shared.try_lock() {
+                self.world.visualize(&mut frame);
+                frame.generation = self.generation;
+                frame.seconds = self.elapsed_samples as f64 / self.sr as f64;
+            }
+        }
     }
 
     fn publish_events(&mut self) {
@@ -254,6 +285,7 @@ impl Player {
         }
         self.meter_samples += 1;
         if self.meter_samples >= (self.sr / 10.0) as u32 {
+            self.publish_visual();
             let _ = self.snapshots.try_send(Snapshot {
                 generation: self.generation,
                 seconds: self.elapsed_samples as f64 / self.sr as f64,
@@ -338,6 +370,7 @@ struct Ui {
     building: bool,
     snapshot: Snapshot,
     events: EventView,
+    visual: Visualization,
     discovery: Option<alien::Discovery>,
     condition: usize,
     notice: Option<String>,
@@ -374,7 +407,10 @@ impl Ui {
     ) -> Vec<(Color, String)> {
         let discovery = self.discovery.as_ref().unwrap();
         let mut lines = vec![
-            (Color::Cyan, " ripple / alien discovery | l live log".into()),
+            (
+                Color::Cyan,
+                " ripple / alien discovery | v physics | l log".into(),
+            ),
             (Color::DarkGrey, format!(" {device} | {sr} Hz")),
             (
                 Color::White,
@@ -477,7 +513,7 @@ impl Ui {
         let mut lines = vec![
             (
                 Color::Cyan,
-                " ripple / a world you can hear | l live log".into(),
+                " ripple / a world you can hear | v physics | l log".into(),
             ),
             (Color::DarkGrey, format!(" {device} | {sr} Hz")),
         ];
@@ -575,6 +611,15 @@ impl Ui {
     }
 
     fn draw(&self, device: &str, sr: u32) -> io::Result<()> {
+        if self.visual.visible {
+            return self.visual.draw(
+                self.name(),
+                self.paused,
+                self.loading.is_some(),
+                &self.events,
+                &self.snapshot,
+            );
+        }
         if self.events.visible {
             let title = if self.discovery.is_some() {
                 if self.condition == 0 {
@@ -591,7 +636,10 @@ impl Ui {
         let mut stdout = io::stdout().lock();
         let lines = if (width < 54 || height < 20) && self.discovery.is_some() {
             let mut lines = vec![
-                (Color::Cyan, " ripple / discovery | l log".into()),
+                (
+                    Color::Cyan,
+                    " ripple / discovery | v physics | l log".into(),
+                ),
                 (
                     Color::White,
                     format!(
@@ -615,7 +663,7 @@ impl Ui {
             lines
         } else if width < 54 || height < 20 {
             let mut lines = vec![
-                (Color::Cyan, " ripple / worlds | l log".into()),
+                (Color::Cyan, " ripple / worlds | v physics | l log".into()),
                 (
                     Color::White,
                     format!(
@@ -701,8 +749,10 @@ fn play(name: &str, seed: u32, discovery: Option<alien::Discovery>) -> Result<()
     let (retired_tx, retired_rx) = mpsc::sync_channel(4);
     let (errors_tx, errors_rx) = mpsc::sync_channel(1);
     let (loaded_tx, loaded_rx) = mpsc::channel::<(u64, usize, Source)>();
-    let player =
-        Player::new(world, sr as f32, commands_rx, snapshots_tx, retired_tx).observing(events_tx);
+    let visual = Visualization::default();
+    let player = Player::new(world, sr as f32, commands_rx, snapshots_tx, retired_tx)
+        .observing(events_tx)
+        .visualizing(visual.shared.clone());
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => make_stream::<f32>(&device, &config, player, errors_tx)?,
         cpal::SampleFormat::I16 => make_stream::<i16>(&device, &config, player, errors_tx)?,
@@ -725,6 +775,7 @@ fn play(name: &str, seed: u32, discovery: Option<alien::Discovery>) -> Result<()
             ..Snapshot::default()
         },
         events: EventView::default(),
+        visual,
         discovery,
         condition: 1,
         notice: None,
@@ -782,6 +833,7 @@ fn play(name: &str, seed: u32, discovery: Option<alien::Discovery>) -> Result<()
             ui.events.receive(batch, ui.snapshot.generation);
         }
         if last_draw.elapsed() >= Duration::from_millis(100) {
+            ui.visual.refresh(ui.snapshot.generation);
             ui.draw(&device_name, sr)?;
             last_draw = Instant::now();
         }
@@ -801,7 +853,8 @@ fn play(name: &str, seed: u32, discovery: Option<alien::Discovery>) -> Result<()
                 {
                     break;
                 }
-                if ui.events.handle_key(code) {
+                if ui.visual.handle_key(code, &mut ui.events.visible) || ui.events.handle_key(code)
+                {
                     last_draw = Instant::now() - Duration::from_secs(1);
                     continue;
                 }
@@ -883,6 +936,46 @@ fn play(name: &str, seed: u32, discovery: Option<alien::Discovery>) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visualization_is_passive_even_when_the_ui_is_contended_and_pause_freezes_state() {
+        let (base, commands, _, retired) = player();
+        let (mut reference, _, _, _) = player();
+        let visual = Visualization::default();
+        let mut observed = base.visualizing(visual.shared.clone());
+        let guard = visual.shared.lock().unwrap();
+        for _ in 0..9600 {
+            assert_eq!(observed.next(), reference.next());
+        }
+        assert_eq!(guard.seconds, 0.0); // busy UI: observations skipped, audio continued
+        drop(guard);
+        observed.publish_visual();
+        commands.send(Command::Pause(true)).unwrap();
+        observed.begin_buffer();
+        let frozen = format!("{:?}", visual.shared.lock().unwrap());
+        for _ in 0..9600 {
+            assert_eq!(observed.next(), (0.0, 0.0));
+        }
+        assert_eq!(format!("{:?}", visual.shared.lock().unwrap()), frozen);
+        commands
+            .send(Command::Replace {
+                generation: 4,
+                paused: false,
+                world: presets::build("hearth", 48_000.0, 17).unwrap().into(),
+            })
+            .unwrap();
+        observed.begin_buffer();
+        drop(retired.try_recv().unwrap());
+        for _ in 0..4800 {
+            observed.next();
+        }
+        let frame = visual.shared.lock().unwrap();
+        assert_eq!(frame.generation, 4);
+        assert_eq!(frame.seed, 17);
+        assert_eq!(frame.seconds, 0.1);
+        assert!(frame.bodies.values.is_empty());
+        assert!(frame.fire.is_some());
+    }
 
     fn player() -> (
         Player,

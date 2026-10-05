@@ -91,6 +91,30 @@ pub struct Field {
 }
 
 impl Field {
+    pub(crate) fn visualize(&self, frame: &mut crate::visual::Frame) {
+        frame.width = self.w;
+        frame.height = self.h;
+        frame.cell_m = self.cell;
+        for y in 0..self.h {
+            for x in 0..self.w {
+                let i = self.idx(x, y);
+                frame.cells.push(crate::visual::Cell {
+                    bed_m: self.terrain[i],
+                    depth_m: self.depth[i],
+                    flux: [
+                        0.5 * (self.fx[i] + if x > 0 { self.fx[i - 1] } else { 0.0 }),
+                        0.5 * (self.fy[i] + if y > 0 { self.fy[i - self.w] } else { 0.0 }),
+                    ],
+                    surface: self.surface[i],
+                });
+            }
+        }
+        let stats = self.history_stats();
+        frame.water_m3 = stats.surface_water_m3;
+        frame.retained_m3 = stats.retained_water_m3;
+        frame.sediment_m3 = stats.suspended_solid_m3;
+    }
+
     pub fn new(w: usize, h: usize, cell: f32, seed: u32) -> Self {
         let n = w * h;
         Self {

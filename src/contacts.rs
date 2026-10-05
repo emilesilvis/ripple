@@ -158,6 +158,22 @@ pub struct ChimeRig {
 }
 
 impl ChimeRig {
+    pub(crate) fn visualize(&self, frame: &mut crate::visual::Frame) {
+        frame.contact = self.diagnostics();
+        for (i, body) in std::iter::once(&self.clapper).chain(&self.bars).enumerate() {
+            frame.bodies.push(crate::visual::SuspendedBody {
+                origin_m: body.origin,
+                position_m: body.position,
+                radius_m: body.radius,
+                touching: if i == 0 {
+                    self.touching.iter().any(|t| *t)
+                } else {
+                    self.touching[i - 1]
+                },
+            });
+        }
+    }
+
     pub fn new(lengths_m: &[f32], seed: u32) -> Self {
         let mut rng = Noise::new(seed ^ 0xc01d_ca11);
         let orientation = rng.unit() as f64 * TAU;

@@ -27,6 +27,7 @@ another world, the current audio continues while its terrain is prepared.
 | `r` | Restart the playing world with the same seed |
 | `n` | Restart the playing world with a new seed |
 | `l` | Open or close the live event log |
+| `v` | Open or close the physical visualization |
 | `q` / `Esc` | Quit |
 
 The screen shows the seed, elapsed simulation time, volume, and output level.
@@ -45,6 +46,33 @@ filters the log; `h` holds the view while audio continues; arrows or Page Up/Dow
 scroll; `End` returns to the live tail. `Space` pauses the simulation itself.
 The view keeps the latest 2,048 records and reports any missed events.
 See [live events](docs/live-events.md) for coverage and structured export.
+
+## See the simulation
+
+Press **`v` in any player** to open the physical visualization in the terminal.
+`Tab` / `Shift-Tab` or `1`–`5` selects water depth, bed elevation, flow,
+chime suspension, or local hearing. `[` / `]` changes the displayed population.
+`v` returns to the player; `l` opens the event log. Pause, volume, restart,
+and the discovery player's A/B controls remain available.
+
+The views read the **same running state that generates the audio**, at ten
+snapshots per second. Water uses a fixed depth scale in metres; bed elevation
+shows its current range. Flow arrows show signed mean solver flux, without
+claiming a calibrated velocity. Chimes show actual positions and collision
+radii in their local horizontal plane. Creatures appear at their fixed hearing
+positions, with current source calls and recently heard connections. Rain
+marks and heard connections persist for half a simulation second, explicitly
+as event marks. Pause freezes the state and these marks.
+
+The original resonator A/B experiment shows frequencies and current modal
+energies, including the actual audio crossfade. It does not animate sampled
+audio-frequency displacement as if it were slow physical motion.
+
+Each model keeps its own coordinates: the water grid, each hearing scene,
+and the chime rig are **not assembled into an invented shared landscape**.
+Wind, daylight, rain and fire are labeled model drivers. Bubbles are counted;
+the engine does not supply positions for a bubble map. See
+[visualization details](docs/visualization.md) for scales and limitations.
 
 ## Discover alien soundscapes
 
@@ -194,6 +222,8 @@ src/
   tui/library.rs   browsing, playback, and background exploration
   tui/event_view.rs scrolling live event log, filtering, and held views
   tui/activity.rs  rolling activity, heard connections, and state summaries
+  tui/visualization.rs physical maps, scales, and view controls
+  visual.rs     bounded read-only snapshots of simulation state
   events.rs     bounded event records and offline JSONL traces
   world/assembly.rs shared physical assembly interfaces and diagnostics
   audio.rs      checked offline WAV rendering

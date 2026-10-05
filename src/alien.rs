@@ -699,6 +699,23 @@ impl LiveDemo {
         self.condition = usize::from(condition != 0);
     }
 
+    pub(crate) fn visualize(&self, frame: &mut crate::visual::Frame) {
+        frame.clear();
+        frame.ready = true;
+        frame.candidate = Some(self.condition);
+        frame.mix = self.mix;
+        for (candidate, scene) in self.landscapes.iter().enumerate() {
+            for (index, mode) in scene.modes[..scene.genome.nodes.len()].iter().enumerate() {
+                frame.resonances.push(crate::visual::Resonance {
+                    candidate,
+                    index,
+                    hz: scene.structure.omega[index] / TAU,
+                    energy: 0.5 * (mode.z * mode.z + mode.v * mode.v),
+                });
+            }
+        }
+    }
+
     pub fn next_sample(&mut self) -> (f32, f32) {
         let [a, b] = self.next_pair();
         self.mix += (self.condition as f64 - self.mix) * self.blend_step;

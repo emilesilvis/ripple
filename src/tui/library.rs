@@ -29,6 +29,7 @@ struct Browser {
     volume: f32,
     snapshot: Snapshot,
     events: EventView,
+    visual: Visualization,
     progress: Progress,
     searching: bool,
     local_search: bool,
@@ -79,6 +80,15 @@ impl Browser {
         }
     }
     fn draw(&self) -> io::Result<()> {
+        if self.visual.visible {
+            return self.visual.draw(
+                self.playing.as_deref().unwrap_or("preparing world"),
+                self.paused,
+                self.loading.is_some(),
+                &self.events,
+                &self.snapshot,
+            );
+        }
         if self.events.visible {
             return self.events.draw(
                 self.playing.as_deref().unwrap_or("preparing world"),
@@ -120,7 +130,7 @@ impl Browser {
         let mut lines = vec![
             (
                 Color::Cyan,
-                " ripple / alien world library | l live log".to_owned(),
+                " ripple / alien world library | v physics | l log".to_owned(),
             ),
             (
                 Color::White,
@@ -239,7 +249,10 @@ impl Browser {
         // Keep controls available in narrow terminals; no hidden modal dialog.
         if width < 60 || height < 16 {
             lines = vec![
-                (Color::Cyan, " ripple / alien library | l log".into()),
+                (
+                    Color::Cyan,
+                    " ripple / alien library | v physics | l log".into(),
+                ),
                 (
                     Color::White,
                     if self.searching {
@@ -347,6 +360,7 @@ pub fn run(directory: &Path, seed: u32) -> Result<()> {
     let (events_tx, events_rx) = mpsc::sync_channel(16);
     let (retired_tx, retired_rx) = mpsc::sync_channel(4);
     let (errors_tx, errors_rx) = mpsc::sync_channel(1);
+    let visual = Visualization::default();
     let player = Player::new(
         Source::Silence,
         sr as f32,
@@ -354,7 +368,8 @@ pub fn run(directory: &Path, seed: u32) -> Result<()> {
         snapshots_tx,
         retired_tx,
     )
-    .observing(events_tx);
+    .observing(events_tx)
+    .visualizing(visual.shared.clone());
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => make_stream::<f32>(&device, &config, player, errors_tx)?,
         cpal::SampleFormat::I16 => make_stream::<i16>(&device, &config, player, errors_tx)?,
@@ -375,6 +390,7 @@ pub fn run(directory: &Path, seed: u32) -> Result<()> {
         volume: 0.7,
         snapshot: Snapshot::default(),
         events: EventView::default(),
+        visual,
         progress: Progress::default(),
         searching: false,
         local_search: false,
@@ -493,6 +509,7 @@ pub fn run(directory: &Path, seed: u32) -> Result<()> {
             browser.events.receive(batch, browser.snapshot.generation);
         }
         if last_draw.elapsed() >= Duration::from_millis(100) {
+            browser.visual.refresh(browser.snapshot.generation);
             browser.draw()?;
             last_draw = Instant::now();
         }
@@ -511,7 +528,9 @@ pub fn run(directory: &Path, seed: u32) -> Result<()> {
                 {
                     break;
                 }
-                if browser.events.handle_key(code) {
+                if browser.visual.handle_key(code, &mut browser.events.visible)
+                    || browser.events.handle_key(code)
+                {
                     last_draw = Instant::now() - Duration::from_secs(1);
                     continue;
                 }

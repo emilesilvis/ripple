@@ -15,6 +15,7 @@ mod matter;
 mod presets;
 mod sky;
 mod tui;
+mod visual;
 mod voices;
 mod world;
 
@@ -66,8 +67,16 @@ live controls:
   +/-                 volume
   r                   restart with the same seed
   n                   restart with a new seed
+  v                   toggle the physical visualization (in every player)
   l                   toggle the live event log (in every player)
   q or Esc            quit
+
+visualization controls:
+  Tab / Shift-Tab     cycle Water, Bed, Flow, Chimes, Hearing
+  1-5                 select a view; [ / ] selects a population
+  v / l               return to player / open the event log
+  Space, +/-, r, q     pause, volume, restart, quit
+  Discovery A/B shows measured modal energies; a/b switches candidate.
 
 event log controls:
   Tab / Shift-Tab     filter All, Calls, Contacts, Water, Weather, Resonators

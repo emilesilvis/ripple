@@ -454,4 +454,7 @@ impl Soundscape {
     pub fn drain_events(&mut self, batch: &mut crate::events::Batch) {
         self.world.drain_events(batch);
     }
+    pub(crate) fn visualize(&self, frame: &mut crate::visual::Frame) {
+        self.world.visualize(frame);
+    }
 }
