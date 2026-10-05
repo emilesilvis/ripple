@@ -130,7 +130,7 @@ impl Browser {
         let mut lines = vec![
             (
                 Color::Cyan,
-                " ripple / alien world library | v physics | l log".to_owned(),
+                " ripple / alien world library | v visualize | l log".to_owned(),
             ),
             (
                 Color::White,
@@ -251,7 +251,7 @@ impl Browser {
             lines = vec![
                 (
                     Color::Cyan,
-                    " ripple / alien library | v physics | l log".into(),
+                    " ripple / alien library | v visualize | l log".into(),
                 ),
                 (
                     Color::White,
@@ -545,6 +545,7 @@ pub fn run(directory: &Path, seed: u32) -> Result<()> {
                     KeyCode::Enter => {
                         if let Some(id) = browser.selected() {
                             browser.request(id);
+                            browser.visual.visible = true;
                         }
                     }
                     KeyCode::Tab => {

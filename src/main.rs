@@ -67,23 +67,23 @@ live controls:
   +/-                 volume
   r                   restart with the same seed
   n                   restart with a new seed
-  v                   toggle the physical visualization (in every player)
+  v                   switch between the visualization and browser
   l                   toggle the live event log (in every player)
   q or Esc            quit
 
-visualization controls:
-  Tab / Shift-Tab     cycle Water, Bed, Flow, Chimes, Hearing
-  1-5                 select a view; [ / ] selects a population
-  v / l               return to player / open the event log
+visualization:
+  Opens automatically and adapts to the soundscape; no view settings.
+  v or Up/Down        browse worlds; Enter plays with its visualization
+  l                   open the event log; l again returns to the picture
   Space, +/-, r, q     pause, volume, restart, quit
-  Discovery A/B shows measured modal energies; a/b switches candidate.
+  a/b in discovery    compare candidates; the picture follows the audio blend
 
 event log controls:
   Tab / Shift-Tab     filter All, Calls, Contacts, Water, Weather, Resonators
   h / End             hold the view / return to the live tail
   Arrows or PgUp/Dn    scroll history; audio keeps playing
   Space, +/-, r, q     pause audio, volume, restart, quit
-  l                   return to the player
+  l                   return to the visualization
 
 discovery controls:
   a/b                 compare parent / automatically selected descendant

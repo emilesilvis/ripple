@@ -8,7 +8,7 @@ and an animal's call reaches its neighbours a moment later.
 ## Listen live
 
 ```sh
-cargo run --release                     # open the world chooser in glade
+cargo run --release                     # play glade with its automatic visualization
 cargo run --release -- shore            # start in a named world
 cargo run --release -- brook --seed 42  # repeatable starting world
 cargo run --release -- list             # list the eight worlds
@@ -27,7 +27,7 @@ another world, the current audio continues while its terrain is prepared.
 | `r` | Restart the playing world with the same seed |
 | `n` | Restart the playing world with a new seed |
 | `l` | Open or close the live event log |
-| `v` | Open or close the physical visualization |
+| `v` | Switch between the automatic visualization and the browser |
 | `q` / `Esc` | Quit |
 
 The screen shows the seed, elapsed simulation time, volume, and output level.
@@ -49,30 +49,21 @@ See [live events](docs/live-events.md) for coverage and structured export.
 
 ## See the simulation
 
-Press **`v` in any player** to open the physical visualization in the terminal.
-`Tab` / `Shift-Tab` or `1`–`5` selects water depth, bed elevation, flow,
-chime suspension, or local hearing. `[` / `]` changes the displayed population.
-`v` returns to the player; `l` opens the event log. Pause, volume, restart,
-and the discovery player's A/B controls remain available.
+The visualization opens automatically when you play a soundscape. Water and
+rain, chimes, calls, and fire appear when they belong to that world; wind has
+a simple strength indicator. All creature populations appear together. The
+original A/B discovery shows the resonances contributing to the current mix.
+There are no visualization settings or views to choose.
 
-The views read the **same running state that generates the audio**, at ten
-snapshots per second. Water uses a fixed depth scale in metres; bed elevation
-shows its current range. Flow arrows show signed mean solver flux, without
-claiming a calibrated velocity. Chimes show actual positions and collision
-radii in their local horizontal plane. Creatures appear at their fixed hearing
-positions, with current source calls and recently heard connections. Rain
-marks and heard connections persist for half a simulation second, explicitly
-as event marks. Pause freezes the state and these marks.
+Press **`v`** or an arrow key to browse, then **`Enter`** to play another world.
+`Space` pauses both sound and motion; `+` / `-` changes the listening volume.
+`l` opens the event log and returns to the picture when pressed again.
+The picture also adapts to small terminals.
 
-The original resonator A/B experiment shows frequencies and current modal
-energies, including the actual audio crossfade. It does not animate sampled
-audio-frequency displacement as if it were slow physical motion.
-
-Each model keeps its own coordinates: the water grid, each hearing scene,
-and the chime rig are **not assembled into an invented shared landscape**.
-Wind, daylight, rain and fire are labeled model drivers. Bubbles are counted;
-the engine does not supply positions for a bubble map. See
-[visualization details](docs/visualization.md) for scales and limitations.
+The display follows the same simulation that produces the audio. Spatial
+parts retain their own local coordinates; fire and wind are simple activity
+symbols, rather than invented fluid simulations. See
+[visualization details](docs/visualization.md) for the rendering rules.
 
 ## Discover alien soundscapes
 
@@ -222,7 +213,7 @@ src/
   tui/library.rs   browsing, playback, and background exploration
   tui/event_view.rs scrolling live event log, filtering, and held views
   tui/activity.rs  rolling activity, heard connections, and state summaries
-  tui/visualization.rs physical maps, scales, and view controls
+  tui/visualization.rs automatic soundscape composition
   visual.rs     bounded read-only snapshots of simulation state
   events.rs     bounded event records and offline JSONL traces
   world/assembly.rs shared physical assembly interfaces and diagnostics

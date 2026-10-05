@@ -216,6 +216,9 @@ impl World {
         frame.seed = self.seed;
         self.field.visualize(frame);
         frame.air = self.sky.air_speed();
+        frame.water_sound = self.stream.is_some() || self.surf.is_some();
+        frame.air_sound = self.wind.is_some() || self.leaves.is_some() || self.whistle.is_some();
+        frame.rain_sound = self.rain_gain > 0.0;
         frame.rain = self.sky.rain();
         frame.daylight = self.sky.daylight();
         frame.fire = (self.fire_gain > 0.0).then_some(self.fire_activity);

@@ -412,7 +412,6 @@ impl Chorus {
         frame.populations.push(crate::visual::Population {
             listener: self.scene.listener,
             barrier: self.scene.barrier,
-            sound_speed: self.scene.sound_speed,
             gain,
         });
         for (index, critter) in self.critters.iter().enumerate() {

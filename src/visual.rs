@@ -68,14 +68,12 @@ pub struct Animal {
 pub struct Population {
     pub listener: Point,
     pub barrier: Option<Barrier>,
-    pub sound_speed: f32,
     pub gain: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct Resonance {
     pub candidate: usize,
-    pub index: usize,
     pub hz: f64,
     pub energy: f64,
 }
@@ -101,6 +99,11 @@ pub struct Frame {
     pub mix: f64,
     /// Dimensionless model drivers, not measured meteorological quantities.
     pub air: f32,
+    /// Presence of sound-producing systems, independent of momentary activity.
+    /// Keeps automatic composition stable during quiet passages.
+    pub water_sound: bool,
+    pub air_sound: bool,
+    pub rain_sound: bool,
     pub rain: f32,
     pub daylight: f32,
     pub fire: Option<f32>,
@@ -130,6 +133,9 @@ impl Default for Frame {
             mix: 0.0,
             contact: Diagnostics::default(),
             air: 0.0,
+            water_sound: false,
+            air_sound: false,
+            rain_sound: false,
             rain: 0.0,
             daylight: 0.0,
             fire: None,
@@ -158,6 +164,9 @@ impl Frame {
         self.mix = 0.0;
         self.contact = Diagnostics::default();
         self.air = 0.0;
+        self.water_sound = false;
+        self.air_sound = false;
+        self.rain_sound = false;
         self.rain = 0.0;
         self.daylight = 0.0;
         self.fire = None;

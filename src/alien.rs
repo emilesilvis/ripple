@@ -708,7 +708,6 @@ impl LiveDemo {
             for (index, mode) in scene.modes[..scene.genome.nodes.len()].iter().enumerate() {
                 frame.resonances.push(crate::visual::Resonance {
                     candidate,
-                    index,
                     hz: scene.structure.omega[index] / TAU,
                     energy: 0.5 * (mode.z * mode.z + mode.v * mode.v),
                 });

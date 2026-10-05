@@ -409,7 +409,7 @@ impl Ui {
         let mut lines = vec![
             (
                 Color::Cyan,
-                " ripple / alien discovery | v physics | l log".into(),
+                " ripple / alien discovery | v visualize | l log".into(),
             ),
             (Color::DarkGrey, format!(" {device} | {sr} Hz")),
             (
@@ -513,7 +513,7 @@ impl Ui {
         let mut lines = vec![
             (
                 Color::Cyan,
-                " ripple / a world you can hear | v physics | l log".into(),
+                " ripple / a world you can hear | v visualize | l log".into(),
             ),
             (Color::DarkGrey, format!(" {device} | {sr} Hz")),
         ];
@@ -638,7 +638,7 @@ impl Ui {
             let mut lines = vec![
                 (
                     Color::Cyan,
-                    " ripple / discovery | v physics | l log".into(),
+                    " ripple / discovery | v visualize | l log".into(),
                 ),
                 (
                     Color::White,
@@ -663,7 +663,7 @@ impl Ui {
             lines
         } else if width < 54 || height < 20 {
             let mut lines = vec![
-                (Color::Cyan, " ripple / worlds | v physics | l log".into()),
+                (Color::Cyan, " ripple / worlds | v visualize | l log".into()),
                 (
                     Color::White,
                     format!(
@@ -866,7 +866,10 @@ fn play(name: &str, seed: u32, discovery: Option<alien::Discovery>) -> Result<()
                     KeyCode::Down | KeyCode::Char('j') if ui.discovery.is_none() => {
                         ui.cursor = (ui.cursor + 1) % presets::PRESETS.len()
                     }
-                    KeyCode::Enter if ui.discovery.is_none() => ui.request_world(ui.cursor),
+                    KeyCode::Enter if ui.discovery.is_none() => {
+                        ui.request_world(ui.cursor);
+                        ui.visual.visible = true;
+                    }
                     KeyCode::Char('a' | 'A' | 'b' | 'B') | KeyCode::Left | KeyCode::Right
                         if ui.discovery.is_some() && ui.loading.is_none() =>
                     {
